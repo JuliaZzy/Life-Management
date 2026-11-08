@@ -21,6 +21,14 @@ export const facts = pgTable("facts", {
   createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull()
 });
 
+export const resumeSources = pgTable("resume_sources", {
+  id: uuid("id").defaultRandom().primaryKey(),
+  fileName: text("file_name").notNull(),
+  htmlContent: text("html_content").notNull(),
+  isCurrent: boolean("is_current").notNull().default(true),
+  createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull()
+});
+
 export const applications = pgTable("applications", {
   id: uuid("id").defaultRandom().primaryKey(),
   company: text("company").notNull(),
