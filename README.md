@@ -23,6 +23,12 @@ pnpm dev
 
 打开 `http://localhost:3000`。当前演示模式使用浏览器 localStorage，因此不需要先启动 PostgreSQL。
 
+## 本地模型
+
+项目已经接好 Ollama 网关。安装 Ollama 后执行 `ollama serve` 和 `ollama pull qwen2.5:3b`，再启动 Next.js。默认模型是 `qwen2.5:3b`，可以通过 `OLLAMA_MODEL` 切换到 `qwen2.5:7b`。本地服务不可用时，提炼和反思会回到可追踪的规则降级，并在返回结果里标记 `provider: fallback`。
+
+可以用 `pnpm llm:check` 检查服务和模型是否已就绪。`scripts/setup-local-llm.sh` 也保留了本地安装后的启动顺序。
+
 如果需要接数据库，先启动 `docker compose up -d`，再把 `DATABASE_URL` 指向本地 PostgreSQL，并使用 Drizzle Kit 生成迁移。
 
 ## 验证
