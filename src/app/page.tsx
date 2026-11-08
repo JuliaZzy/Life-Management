@@ -53,7 +53,6 @@ const NAV_ITEMS: { key: ViewKey; label: string; short: string }[] = [
   { key: "applications", label: "求职投递", short: "↗" },
   { key: "interviews", label: "面试题库", short: "◇" },
   { key: "study", label: "学习复习", short: "◒" },
-  { key: "planner", label: "今日排程", short: "▦" },
   { key: "reflection", label: "每日反思", short: "✦" },
   { key: "memory", label: "记忆与日志", short: "≋" }
 ];
@@ -128,7 +127,11 @@ function todayLabel() {
 }
 
 export default function HomePage() {
-  const [view, setView] = useState<ViewKey>("overview");
+  const [view, setView] = useState<ViewKey>(() => {
+    if (typeof window === "undefined") return "overview";
+    const saved = window.sessionStorage.getItem("life-management-tab") as ViewKey | null;
+    return saved && NAV_ITEMS.some((item) => item.key === saved) ? saved : "overview";
+  });
   const [projects, setProjects] = useState<Project[]>(seedProjects);
   const [applications, setApplications] = useState<Application[]>(seedApplications);
   const [tasks, setTasks] = useState<PlannerTask[]>(seedTasks);
@@ -139,6 +142,13 @@ export default function HomePage() {
   const [diaryAllowed, setDiaryAllowed] = useState(true);
   const [toast, setToast] = useState("");
   const [showTodayPlan, setShowTodayPlan] = useState(false);
+
+  useEffect(() => {
+    window.sessionStorage.setItem("life-management-tab", view);
+    const url = new URL(window.location.href);
+    url.searchParams.set("tab", view);
+    window.history.replaceState({}, "", url);
+  }, [view]);
 
   useEffect(() => {
     const saved = window.localStorage.getItem("life-management-demo");
