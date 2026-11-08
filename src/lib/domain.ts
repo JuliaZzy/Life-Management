@@ -213,6 +213,15 @@ export function calculateWeightedScore(scores: RubricScores) {
   return Math.round(total * 10) / 10;
 }
 
+export type ResumeMatchScores = { skillCoverage: number; evidence: number; keywordMatch: number; relevance: number; clarity: number };
+
+export const RESUME_MATCH_WEIGHTS: Record<keyof ResumeMatchScores, number> = { skillCoverage: 0.3, evidence: 0.25, keywordMatch: 0.15, relevance: 0.2, clarity: 0.1 };
+
+export function calculateResumeMatchScore(scores: ResumeMatchScores) {
+  const total = (Object.keys(RESUME_MATCH_WEIGHTS) as (keyof ResumeMatchScores)[]).reduce((sum, key) => sum + Math.max(1, Math.min(5, scores[key])) * RESUME_MATCH_WEIGHTS[key], 0);
+  return Math.round(total * 10) / 10;
+}
+
 export function detectCareSignal(text: string) {
   return /(不想活|不想继续|结束生命|自杀|伤害自己|活着没意义|撑不下去)/u.test(text);
 }

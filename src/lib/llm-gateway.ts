@@ -1,4 +1,4 @@
-import { interviewExtractionSchema, plannerSuggestionSchema, reflectionSchema } from "./schemas";
+import { interviewExtractionSchema, memoryTrendSchema, plannerSuggestionSchema, reflectionSchema, resumeMatchSchema } from "./schemas";
 
 type ChatMessage = { role: "system" | "user"; content: string };
 
@@ -71,6 +71,16 @@ function fallbackReflection(input: { diary: string; card: string; orientation: s
 
 export function llmConfig() {
   return { baseUrl: OLLAMA_URL, model: OLLAMA_MODEL, provider: "ollama" as const };
+}
+
+export async function analyzeResumeMatch(input: { jd: string; resume: string; projectContext: string }) {
+  const fallback = resumeMatchSchema.parse({ gaps: [{ skill: "待分析", evidence: "尚未连接本地模型", reason: "需要读取 JD 和简历原文", suggestion: "启动 Ollama 后重新分析" }], highlights: [], safetyChecked: true });
+  try { return await chatJson([{ role: "system", content: "你是简历匹配分析器。只能引用 JD、简历和项目资料中的内容，不能编造技能、公司、数字或经历。只输出 JSON，字段为 gaps、highlights、safetyChecked。" }, { role: "user", content: JSON.stringify(input) }], (value) => resumeMatchSchema.parse(value)); } catch { return fallback; }
+}
+
+export async function analyzeMemoryTrend(input: { history: string; confirmedProfile: string }) {
+  const fallback = memoryTrendSchema.parse({ observations: ["历史数据不足，暂不形成长期结论。"], suggestions: [], safetyChecked: true });
+  try { return await chatJson([{ role: "system", content: "你是记忆分析器。只根据原始历史记录提出规律候选，不直接写入画像。每条建议必须 requiresConfirmation=true。只输出 JSON。" }, { role: "user", content: JSON.stringify(input) }], (value) => memoryTrendSchema.parse(value)); } catch { return fallback; }
 }
 
 export async function generatePlannerSuggestion(input: { card: string; orientation: "正位" | "逆位"; keywords: string[]; userPlan: string; mood: string; observations: string[] }): Promise<LlmResult<ReturnType<typeof plannerSuggestionSchema.parse>>> {

@@ -32,7 +32,21 @@ export const plannerSuggestionSchema = z.object({
   safetyChecked: z.literal(true)
 });
 
+export const resumeMatchSchema = z.object({
+  gaps: z.array(z.object({ skill: z.string(), evidence: z.string(), reason: z.string(), suggestion: z.string() })),
+  highlights: z.array(z.string()),
+  safetyChecked: z.literal(true)
+});
+
+export const memoryTrendSchema = z.object({
+  observations: z.array(z.string()),
+  suggestions: z.array(z.object({ text: z.string(), source: z.string(), requiresConfirmation: z.literal(true) })),
+  safetyChecked: z.literal(true)
+});
+
 export type SkillGap = z.infer<typeof skillGapSchema>;
 export type InterviewExtraction = z.infer<typeof interviewExtractionSchema>;
 export type Reflection = z.infer<typeof reflectionSchema>;
 export type PlannerSuggestion = z.infer<typeof plannerSuggestionSchema>;
+export type ResumeMatch = z.infer<typeof resumeMatchSchema>;
+export type MemoryTrend = z.infer<typeof memoryTrendSchema>;
