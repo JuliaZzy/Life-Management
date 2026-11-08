@@ -13,12 +13,11 @@ import {
   markSilentApplications,
   PlannerTask,
   RubricScores,
-  scheduleTasks,
   transitionApplication
 } from "@/lib/domain";
 import { drawTarot, shuffleTarot, tarotDeck, TarotDraw } from "@/lib/tarot";
 
-type ViewKey = "overview" | "projects" | "applications" | "interviews" | "study" | "planner" | "reflection" | "memory";
+type ViewKey = "overview" | "projects" | "applications" | "interviews" | "study" | "reflection" | "memory";
 
 type Project = {
   id: string;
@@ -49,7 +48,13 @@ type MemorySuggestion = { id: string; text: string; source: string; status: "待
 type PlannerSnapshot = {
   tone?: string;
   tarot?: { card?: string; orientation?: string; keywords?: string[] };
+  observations?: string[];
   suggestions?: { text?: string }[];
+};
+
+type OverviewStats = {
+  todayApplications: number;
+  todayInterviews: number;
 };
 
 const NAV_ITEMS: { key: ViewKey; label: string; short: string }[] = [
@@ -68,7 +73,6 @@ const VIEW_TITLES: Record<ViewKey, { eyebrow: string; title: string; description
   applications: { eyebrow: "JOB SEARCH", title: "求职投递", description: "状态流转、沉默标记和简历版本都可追溯。" },
   interviews: { eyebrow: "INTERVIEW CONTENT", title: "面试题库", description: "从原始记录提炼问题，重复项先提示再合并。" },
   study: { eyebrow: "SPACED REPETITION", title: "学习复习", description: "复习间隔由代码计算，模型只负责解释。" },
-  planner: { eyebrow: "DAILY PLANNER", title: "今日排程", description: "优先安排面试、截止日期和到期复习。" },
   reflection: { eyebrow: "MORNING REFLECTION", title: "每日反思", description: "日记与牌义只用于观察今天，不参与任何决策。" },
   memory: { eyebrow: "AUDIT TRAIL", title: "记忆与日志", description: "所有写入先进入确认队列，每次调用都留下事件。" }
 };
@@ -131,6 +135,17 @@ function todayLabel() {
   return new Intl.DateTimeFormat("zh-CN", { month: "short", day: "numeric", weekday: "short" }).format(new Date());
 }
 
+function todayDateKey(timeZone: string) {
+  const parts = new Intl.DateTimeFormat("en-US", {
+    timeZone,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit"
+  }).formatToParts(new Date());
+  const values = Object.fromEntries(parts.map((part) => [part.type, part.value]));
+  return `${values.year}-${values.month}-${values.day}`;
+}
+
 export default function HomePage() {
   const [view, setView] = useState<ViewKey>(() => {
     if (typeof window === "undefined") return "overview";
@@ -147,7 +162,10 @@ export default function HomePage() {
   const [diaryAllowed, setDiaryAllowed] = useState(true);
   const [toast, setToast] = useState("");
   const [showTodayPlan, setShowTodayPlan] = useState(false);
+  const [showPlannerDetail, setShowPlannerDetail] = useState(false);
   const [plannerSnapshot, setPlannerSnapshot] = useState<PlannerSnapshot | null>(null);
+  const [overviewStats, setOverviewStats] = useState<OverviewStats>({ todayApplications: 0, todayInterviews: 0 });
+  const [stateLoaded, setStateLoaded] = useState(false);
 
   useEffect(() => {
     window.sessionStorage.setItem("life-management-tab", view);
@@ -157,34 +175,75 @@ export default function HomePage() {
   }, [view]);
 
   useEffect(() => {
-    const saved = window.localStorage.getItem("life-management-demo");
-    if (!saved) return;
-    try {
-      const parsed = JSON.parse(saved);
-      if (parsed.projects) setProjects(parsed.projects);
-      if (parsed.applications) setApplications(parsed.applications);
-      if (parsed.tasks) setTasks(parsed.tasks);
-      if (parsed.studyItems) setStudyItems(parsed.studyItems);
-      if (parsed.questions) setQuestions(parsed.questions);
-      if (parsed.suggestions) setSuggestions(parsed.suggestions);
-    } catch {
-      setToast("本地数据读取失败，已使用演示数据");
-    }
+    void fetch("/api/app-state").then((response) => response.json()).then((payload: { state?: Partial<{ projects: Project[]; applications: Application[]; tasks: PlannerTask[]; studyItems: StudyItem[]; questions: Question[]; suggestions: MemorySuggestion[]; diary: string; diaryAllowed: boolean }> | null }) => {
+      const saved = payload.state;
+      if (saved) {
+        if (saved.projects) setProjects(saved.projects);
+        if (saved.applications) setApplications(saved.applications);
+        if (saved.tasks) setTasks(saved.tasks);
+        if (saved.studyItems) setStudyItems(saved.studyItems);
+        if (saved.questions) setQuestions(saved.questions);
+        if (saved.suggestions) setSuggestions(saved.suggestions);
+        if (typeof saved.diary === "string") setDiary(saved.diary);
+        if (typeof saved.diaryAllowed === "boolean") setDiaryAllowed(saved.diaryAllowed);
+      } else {
+        const legacy = window.localStorage.getItem("life-management-demo");
+        if (legacy) {
+          try {
+            const old = JSON.parse(legacy);
+            if (old.projects) setProjects(old.projects);
+            if (old.applications) setApplications(old.applications);
+            if (old.tasks) setTasks(old.tasks);
+            if (old.studyItems) setStudyItems(old.studyItems);
+            if (old.questions) setQuestions(old.questions);
+            if (old.suggestions) setSuggestions(old.suggestions);
+            window.localStorage.removeItem("life-management-demo");
+          } catch { /* discard malformed legacy cache */ }
+        }
+      }
+      setStateLoaded(true);
+    }).catch(() => { setStateLoaded(true); setToast("数据库暂不可用，当前页面不会保存到本地"); });
   }, []);
 
   useEffect(() => {
-    const loadPlannerSnapshot = () => {
-      const stored = window.localStorage.getItem(`today-planner-result-${new Date().toISOString().slice(0, 10)}`);
-      setPlannerSnapshot(stored ? JSON.parse(stored) as PlannerSnapshot : null);
+    const loadPlannerSnapshot = async () => {
+      const response = await fetch(`/api/today-plan?date=${new Date().toISOString().slice(0, 10)}`);
+      const payload = await response.json().catch(() => null) as { plan?: { plannerSnapshot?: PlannerSnapshot | null } } | null;
+      setPlannerSnapshot(payload?.plan?.plannerSnapshot ?? null);
     };
-    loadPlannerSnapshot();
-    window.addEventListener("today-plan-updated", loadPlannerSnapshot);
-    return () => window.removeEventListener("today-plan-updated", loadPlannerSnapshot);
+    void loadPlannerSnapshot();
+    const refresh = () => void loadPlannerSnapshot();
+    window.addEventListener("today-plan-updated", refresh);
+    return () => window.removeEventListener("today-plan-updated", refresh);
   }, []);
 
   useEffect(() => {
-    window.localStorage.setItem("life-management-demo", JSON.stringify({ projects, applications, tasks, studyItems, questions, suggestions }));
-  }, [projects, applications, tasks, studyItems, questions, suggestions]);
+    let cancelled = false;
+    const timeZone = Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC";
+    const date = todayDateKey(timeZone);
+    const query = new URLSearchParams({ date, timezone: timeZone });
+
+    fetch(`/api/overview?${query.toString()}`, { cache: "no-store" })
+      .then((response) => {
+        if (!response.ok) throw new Error("overview stats unavailable");
+        return response.json() as Promise<{ stats?: OverviewStats }>;
+      })
+      .then((payload) => {
+        if (!cancelled && payload.stats) setOverviewStats(payload.stats);
+      })
+      .catch(() => {
+        // Keep the overview usable in local demo mode when PostgreSQL is offline.
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!stateLoaded) return;
+    void fetch("/api/app-state", { method: "PUT", headers: { "content-type": "application/json" }, body: JSON.stringify({ projects, applications, tasks, studyItems, questions, suggestions, diary, diaryAllowed }) });
+  }, [stateLoaded, projects, applications, tasks, studyItems, questions, suggestions, diary, diaryAllowed]);
 
   useEffect(() => {
     if (!toast) return;
@@ -193,7 +252,6 @@ export default function HomePage() {
   }, [toast]);
 
   const current = VIEW_TITLES[view];
-  const silentCount = markSilentApplications(applications, new Date("2026-11-11T12:00:00.000Z"), 7).filter((item) => item.silent).length;
   const doneCount = tasks.filter((task) => task.completed).length;
   const confirmedFacts = projects.flatMap((project) => project.facts).filter((fact) => fact.status === "confirmed").length;
 
@@ -324,18 +382,18 @@ export default function HomePage() {
         <header className="topbar"><div className="breadcrumb"><span>工作台</span><b>/</b><strong>{current.title}</strong></div><div className="topbar-actions"><span className="sync"><i /> 数据已保存</span><button className="icon-button" onClick={() => flash("快捷键面板即将开放")}>⌘</button><button className="primary-button small" onClick={() => setShowTodayPlan(true)}>＋ 今日计划</button></div></header>
         <div className="content-wrap">
           <div className="page-intro"><div><span className="eyebrow">{current.eyebrow}</span><h1>{view === "overview" ? (plannerSnapshot?.tone ?? "一张牌，一个计划，今天从这里开始...") : current.title}</h1>{view !== "overview" && <p>{current.description}</p>}</div>{view === "overview" && <div className="date-chip"><span>今日</span><strong>{todayLabel()}</strong></div>}</div>
-          {view === "overview" && <OverviewView applications={applications} tasks={tasks} projects={projects} doneCount={doneCount} confirmedFacts={confirmedFacts} silentCount={silentCount} setView={setView} plannerSnapshot={plannerSnapshot} diary={diary} />}
+          {view === "overview" && <OverviewView tasks={tasks} projects={projects} doneCount={doneCount} confirmedFacts={confirmedFacts} overviewStats={overviewStats} setView={setView} plannerSnapshot={plannerSnapshot} diary={diary} onPlannerDetail={() => setShowPlannerDetail(true)} onTodayPlan={() => setShowTodayPlan(true)} />}
           {view === "projects" && <ProjectsView projects={projects} addProject={addProject} confirmFact={confirmFact} />}
           {view === "applications" && <ApplicationsView applications={applications} addApplication={addApplication} updateApplicationStatus={updateApplicationStatus} />}
           {view === "interviews" && <InterviewsView questions={questions} generateQuestions={generateQuestions} confirmQuestion={confirmQuestion} />}
           {view === "study" && <StudyView items={studyItems} reviewStudyItem={reviewStudyItem} />}
-          {view === "planner" && <PlannerView tasks={tasks} addTask={addTask} toggleTask={toggleTask} />}
           {view === "reflection" && <ReflectionView diary={diary} setDiary={setDiary} diaryAllowed={diaryAllowed} setDiaryAllowed={setDiaryAllowed} flash={flash} />}
           {view === "memory" && <MemoryView suggestions={suggestions} decideMemory={decideMemory} />}
         </div>
       </section>
       {toast && <div className="toast" role="status"><span>✓</span>{toast}</div>}
       {showTodayPlan && <TodayPlanModal onClose={() => setShowTodayPlan(false)} />}
+      {showPlannerDetail && plannerSnapshot && <PlannerDetailModal snapshot={plannerSnapshot} onClose={() => setShowPlannerDetail(false)} />}
     </main>
   );
 }
@@ -343,32 +401,53 @@ export default function HomePage() {
 function TodayPlanModal({ onClose }: { onClose: () => void }) {
   const [cards, setCards] = useState(() => shuffleTarot());
   const today = new Date().toISOString().slice(0, 10);
-  const storedDraw = typeof window === "undefined" ? null : window.localStorage.getItem("today-tarot");
-  const parsedDraw = storedDraw ? JSON.parse(storedDraw) as TarotDraw : null;
-  const initialDraw = parsedDraw?.date === today ? parsedDraw : null;
-  const [draw, setDraw] = useState<TarotDraw | null>(initialDraw);
-  const [selectedId, setSelectedId] = useState(initialDraw?.id ?? "");
-  const [selectedOrientation, setSelectedOrientation] = useState<"upright" | "reversed">(initialDraw?.orientation ?? "upright");
-  const [plan, setPlan] = useState(() => typeof window === "undefined" ? "" : window.localStorage.getItem(`today-plan-${today}`) ?? "");
-  function drawToday() { if (initialDraw?.date === today) { setDraw(initialDraw); setSelectedId(initialDraw.id); setSelectedOrientation(initialDraw.orientation); return; } const next = drawTarot(cards, today); localStorage.setItem("today-tarot", JSON.stringify(next)); setDraw(next); setSelectedId(next.id); setSelectedOrientation(next.orientation); }
+  const [draw, setDraw] = useState<TarotDraw | null>(null);
+  const [selectedId, setSelectedId] = useState("");
+  const [selectedOrientation, setSelectedOrientation] = useState<"upright" | "reversed">("upright");
+  const [plan, setPlan] = useState("");
+  const [locked, setLocked] = useState(false);
+  const [isSaving, setIsSaving] = useState(false);
+  const [saveError, setSaveError] = useState("");
+  useEffect(() => { void fetch(`/api/today-plan?date=${today}`).then((response) => response.json()).then((payload: { plan?: { body?: string }; tarot?: { cardId: string; cardName: string; image: string; orientation: TarotDraw["orientation"]; position: number; keywords: string[]; drawDate: string } }) => { if (payload.plan) setPlan(payload.plan.body ?? ""); if (payload.tarot) { const saved = { id: payload.tarot.cardId, name: payload.tarot.cardName, image: payload.tarot.image, orientation: payload.tarot.orientation, position: payload.tarot.position, keywords: payload.tarot.keywords, date: payload.tarot.drawDate }; setLocked(true); setDraw(saved); setSelectedId(saved.id); setSelectedOrientation(saved.orientation); } }).catch(() => undefined); }, [today]);
+  function drawToday() { if (locked) return; const next = drawTarot(cards, today); setDraw(next); setSelectedId(next.id); setSelectedOrientation(next.orientation); }
   const selectedCard = tarotDeck.find((card) => card.id === selectedId);
   const visibleCard = selectedCard ? { ...selectedCard, orientation: selectedOrientation } : draw;
   async function saveTodayPlan() {
+    if (isSaving) return;
+    setIsSaving(true);
+    setSaveError("");
     const chosen = selectedCard ? { ...selectedCard, position: selectedCard.id === draw?.id ? draw.position : 1, orientation: selectedOrientation, date: today } : draw;
-    if (chosen) localStorage.setItem("today-tarot", JSON.stringify(chosen));
-    localStorage.setItem(`today-plan-${today}`, plan);
-    if (chosen) {
-      const response = await fetch("/api/llm", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ task: "planner", card: chosen.name, orientation: chosen.orientation === "upright" ? "正位" : "逆位", keywords: chosen.keywords, userPlan: plan, mood: "", observations: ["今日事项与历史趋势由代码汇总"] }) });
-      const payload = await response.json() as { data?: PlannerSnapshot };
-      if (payload.data) localStorage.setItem(`today-planner-result-${today}`, JSON.stringify(payload.data));
+    try {
+      let plannerSnapshot: PlannerSnapshot | undefined;
+      if (chosen) {
+        const response = await fetch("/api/llm", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ task: "planner", card: chosen.name, orientation: chosen.orientation === "upright" ? "正位" : "逆位", keywords: chosen.keywords, userPlan: plan, mood: "", observations: ["今日事项与历史趋势由代码汇总"] }) });
+        if (!response.ok) throw new Error("planner request failed");
+        const payload = await response.json() as { data?: PlannerSnapshot };
+        plannerSnapshot = payload.data;
+        if (!locked) {
+          const tarotResponse = await fetch("/api/today-plan", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ date: today, cardId: chosen.id, cardName: chosen.name, image: chosen.image, orientation: chosen.orientation, position: chosen.position, keywords: chosen.keywords }) });
+          if (!tarotResponse.ok && tarotResponse.status !== 409) throw new Error("tarot request failed");
+          setLocked(true);
+        }
+      }
+      const planResponse = await fetch("/api/today-plan", { method: "PUT", headers: { "content-type": "application/json" }, body: JSON.stringify({ date: today, plan, plannerSnapshot }) });
+      if (!planResponse.ok) throw new Error("plan request failed");
+      window.dispatchEvent(new Event("today-plan-updated"));
+      onClose();
+    } catch {
+      setSaveError("保存失败，请稍后重试");
+    } finally {
+      setIsSaving(false);
     }
-    window.dispatchEvent(new Event("today-plan-updated"));
-    onClose();
   }
-  return <div className="modal-backdrop" onClick={onClose}><section className="today-plan-modal" onClick={(e) => e.stopPropagation()}><div className="modal-head"><div><span className="eyebrow">TODAY PLAN</span><h2>今天的计划</h2></div><button className="icon-button" onClick={onClose}>×</button></div><div className="today-plan-grid"><div className="today-tarot-side"><div className="tarot-draw-slot">{visibleCard ? <><img src={visibleCard.image} alt={visibleCard.name} /><strong>{visibleCard.name}</strong><span>{visibleCard.orientation === "upright" ? "正位" : "逆位"}</span></> : <span>＋</span>}</div><select className="tarot-select" value={selectedId} onChange={(e) => setSelectedId(e.target.value)}><option value="">选择你抽到的牌</option>{tarotDeck.map((card) => <option key={card.id} value={card.id}>{card.name}</option>)}</select><select className="tarot-select" value={selectedOrientation} onChange={(e) => setSelectedOrientation(e.target.value as "upright" | "reversed")}><option value="upright">正位</option><option value="reversed">逆位</option></select><div className="tarot-actions"><button className="secondary-button" onClick={() => setCards(shuffleTarot())}>洗牌</button><button className="primary-button" onClick={drawToday}>抽牌</button></div><small>可以手动选择你抽到的牌，也可以让系统抽牌。</small></div><div className="today-plan-input"><label>你今天想完成什么？<textarea value={plan} onChange={(e) => setPlan(e.target.value)} placeholder="例如：复习两道题，下午出去走走…" /></label><button className="primary-button full" onClick={saveTodayPlan}>保存并交给规划 Agent</button></div></div></section></div>;
+  return <div className="modal-backdrop" onClick={isSaving ? undefined : onClose}><section className="today-plan-modal" aria-busy={isSaving} onClick={(e) => e.stopPropagation()}><div className="modal-head"><div><span className="eyebrow">TODAY PLAN</span><h2>今天的计划</h2></div><button className="icon-button" disabled={isSaving} onClick={onClose}>×</button></div><div className="today-plan-grid"><div className="today-tarot-side"><div className="tarot-draw-slot">{visibleCard ? <><img src={visibleCard.image} alt={visibleCard.name} /><strong>{visibleCard.name}</strong><span>{visibleCard.orientation === "upright" ? "正位" : "逆位"}</span></> : <span>＋</span>}</div><select className="tarot-select" disabled={locked || isSaving} value={selectedId} onChange={(e) => setSelectedId(e.target.value)}><option value="">选择你抽到的牌</option>{tarotDeck.map((card) => <option key={card.id} value={card.id}>{card.name}</option>)}</select><select className="tarot-select" disabled={locked || isSaving} value={selectedOrientation} onChange={(e) => setSelectedOrientation(e.target.value as "upright" | "reversed")}><option value="upright">正位</option><option value="reversed">逆位</option></select><div className="tarot-actions"><button className="secondary-button" disabled={locked || isSaving} onClick={() => setCards(shuffleTarot())}>洗牌</button><button className="primary-button" disabled={locked || isSaving} onClick={drawToday}>抽牌</button></div><small>{locked ? "今日塔罗已锁定，只能修改计划。" : "可以手动选择你抽到的牌，也可以让系统抽牌。"}</small></div><div className="today-plan-input"><label>你今天想完成什么？<textarea disabled={isSaving} value={plan} onChange={(e) => setPlan(e.target.value)} placeholder="例如：复习两道题，下午出去走走…" /></label>{saveError && <p className="save-error" role="alert">{saveError}</p>}<button className="primary-button full" disabled={isSaving} aria-busy={isSaving} onClick={saveTodayPlan}>{isSaving && <span className="loading-spinner" aria-hidden="true" />}{isSaving ? "正在保存并生成规划…" : "保存并交给规划 Agent"}</button></div></div></section></div>;
 }
 
-function OverviewView({ applications, tasks, projects, doneCount, confirmedFacts, silentCount, setView, plannerSnapshot, diary }: { applications: Application[]; tasks: PlannerTask[]; projects: Project[]; doneCount: number; confirmedFacts: number; silentCount: number; setView: (view: ViewKey) => void; plannerSnapshot: PlannerSnapshot | null; diary: string }) {
+function PlannerDetailModal({ snapshot, onClose }: { snapshot: PlannerSnapshot; onClose: () => void }) {
+  return <div className="modal-backdrop" onClick={onClose}><section className="planner-detail-modal" onClick={(event) => event.stopPropagation()}><div className="modal-head"><div><span className="eyebrow">PLANNER AGENT</span><h2>今日建议详情</h2></div><button className="icon-button" onClick={onClose}>×</button></div><div className="planner-detail-content">{snapshot.tarot && <div className="planner-detail-card"><span className="eyebrow">牌面</span><strong>{snapshot.tarot.card} · {snapshot.tarot.orientation}</strong><small>{snapshot.tarot.keywords?.join(" · ")}</small></div>}{snapshot.tone && <div className="planner-detail-section"><span>给今天的一句话</span><p>{snapshot.tone}</p></div>}{snapshot.observations && snapshot.observations.length > 0 && <div className="planner-detail-section"><span>代码依据</span>{snapshot.observations.map((item) => <p className="planner-detail-observation" key={item}>· {item}</p>)}</div>}<div className="planner-detail-section"><span>规划 Agent 生成的全部建议</span>{snapshot.suggestions?.map((suggestion, index) => <article className="planner-detail-suggestion" key={`${suggestion.text}-${index}`}><b>{index + 1}</b><div><strong>{suggestion.text}</strong></div></article>)}</div></div><button className="primary-button full" onClick={onClose}>知道了</button></section></div>;
+}
+
+function OverviewView({ tasks, projects, doneCount, confirmedFacts, overviewStats, setView, plannerSnapshot, diary, onPlannerDetail, onTodayPlan }: { tasks: PlannerTask[]; projects: Project[]; doneCount: number; confirmedFacts: number; overviewStats: OverviewStats; setView: (view: ViewKey) => void; plannerSnapshot: PlannerSnapshot | null; diary: string; onPlannerDetail: () => void; onTodayPlan: () => void }) {
   const planned = tasks.filter((task) => !task.completed).length;
   const hasTodayStatus = diary.trim().length > 0;
   const tarotLabel = plannerSnapshot?.tarot?.card ? `${plannerSnapshot.tarot.card}（${plannerSnapshot.tarot.orientation ?? "正位"}）` : "今日尚未抽牌";
@@ -383,10 +462,10 @@ function OverviewView({ applications, tasks, projects, doneCount, confirmedFacts
       <MetricCard label="连续专注" value="06" detail="天" accent="yellow" icon="✦" />
     </div>
     <div className="dashboard-grid">
-      <section className="panel focus-panel"><PanelHeader title="今天的焦点" action="查看排程" onAction={() => setView("planner")} /><div className="focus-hero"><div className="focus-number">01</div><div><span className="tag coral">规划 Agent</span><h2>{focus}</h2><p>依据 {tarotLabel} 与今日计划生成，可按你的判断调整。</p></div><span className="duration">今日</span></div><div className="progress-line"><span style={{ width: plannerSnapshot ? "65%" : "10%" }} /></div><div className="focus-footer"><span>{plannerSnapshot ? "已生成今日建议" : "等待今日计划"}</span><button className="text-button" onClick={() => setView("planner")}>查看规划 →</button></div></section>
-      <section className="panel snapshot-panel"><PanelHeader title="状态快照" action="详情" onAction={() => setView("applications")} /><div className="mini-stat-row"><div><strong>{applications.length}</strong><span>进行中的投递</span></div><div><strong>{silentCount}</strong><span>沉默提醒</span></div><div><strong>{planned}</strong><span>待完成事项</span></div></div><div className="funnel"><div className="funnel-row"><span>已投递</span><div><i style={{ width: "100%" }} /></div><b>3</b></div><div className="funnel-row"><span>沟通中</span><div><i className="violet-bar" style={{ width: "33%" }} /></div><b>1</b></div><div className="funnel-row"><span>面试中</span><div><i className="mint-bar" style={{ width: "33%" }} /></div><b>1</b></div></div></section>
+      <section className="panel focus-panel"><PanelHeader title="今天的焦点" action="查看建议" onAction={onPlannerDetail} /><div className="focus-hero"><div className="focus-number">01</div><div><span className="tag coral">规划 Agent</span><h2>{focus}</h2><p>依据 {tarotLabel} 与今日计划生成，可按你的判断调整。</p></div><span className="duration">今日</span></div><div className="progress-line"><span style={{ width: plannerSnapshot ? "65%" : "10%" }} /></div><div className="focus-footer"><span>{plannerSnapshot ? "已生成今日建议" : "等待今日计划"}</span><button className="text-button" onClick={onPlannerDetail}>查看规划 →</button></div></section>
+      <section className="panel snapshot-panel"><PanelHeader title="状态快照" action="详情" onAction={() => setView("applications")} /><div className="mini-stat-row"><div><strong>{overviewStats.todayApplications}</strong><span>今日投递</span></div><div><strong>{overviewStats.todayInterviews}</strong><span>今日面试</span></div><div><strong>{planned}</strong><span>待完成事项</span></div></div><div className="funnel"><div className="funnel-row"><span>已投递</span><div><i style={{ width: "100%" }} /></div><b>3</b></div><div className="funnel-row"><span>沟通中</span><div><i className="violet-bar" style={{ width: "33%" }} /></div><b>1</b></div><div className="funnel-row"><span>面试中</span><div><i className="mint-bar" style={{ width: "33%" }} /></div><b>1</b></div></div></section>
     </div>
-    <div className="dashboard-grid lower"><section className="panel task-panel"><PanelHeader title="今日事项" action={plannerItems.length ? "规划 Agent 已生成" : `${doneCount}/${tasks.length} 完成`} onAction={() => setView("planner")} /><div className="task-list">{overviewItems.map((task) => <button className={`task-row ${task.completed ? "completed" : ""}`} key={task.id} onClick={() => setView("planner")}><span className="check-circle">{task.completed ? "✓" : ""}</span><span className="task-title">{task.title}</span><span className={`task-kind ${task.kind ?? "other"}`}>{task.kind ? kindLabel(task.kind) : "建议"}</span><span className="task-time">{task.durationMinutes}m</span></button>)}</div></section><section className="panel reflection-teaser"><PanelHeader title="今日反思" action="去写一条" onAction={() => setView("reflection")} />{hasTodayStatus ? <div className="reflection-quote"><span className="quote-mark">“</span><p>昨日的牌面与今日事项已经留下线索，继续观察你的节奏，答案会在完成一件小事后变得清楚。</p><span className="quote-meta">昨日快照 · {tarotLabel} · 结合学习与事项</span></div> : <div className="reflection-empty"><p>还没有写下今天的状态。</p><button className="outline-button full" onClick={() => setView("reflection")}>写下今天的状态 <span>→</span></button></div>}</section></div>
+    <div className="dashboard-grid lower"><section className="panel task-panel"><PanelHeader title="今日事项" action={plannerItems.length ? "规划 Agent 已生成" : `${doneCount}/${tasks.length} 完成`} onAction={plannerItems.length ? onPlannerDetail : onTodayPlan} /><div className="task-list">{overviewItems.map((task) => <button className={`task-row ${task.completed ? "completed" : ""}`} key={task.id} onClick={plannerItems.length ? onPlannerDetail : onTodayPlan}><span className="check-circle">{task.completed ? "✓" : ""}</span><span className="task-title">{task.title}</span><span className={`task-kind ${task.kind ?? "other"}`}>{task.kind ? kindLabel(task.kind) : "建议"}</span><span className="task-time">{task.durationMinutes}m</span></button>)}</div></section><section className="panel reflection-teaser"><PanelHeader title="今日反思" action="去写一条" onAction={() => setView("reflection")} />{hasTodayStatus ? <div className="reflection-quote"><span className="quote-mark">“</span><p>昨日的牌面与今日事项已经留下线索，继续观察你的节奏，答案会在完成一件小事后变得清楚。</p><span className="quote-meta">昨日快照 · {tarotLabel} · 结合学习与事项</span></div> : <div className="reflection-empty"><p>还没有写下今天的状态。</p><button className="outline-button full" onClick={() => setView("reflection")}>写下今天的状态 <span>→</span></button></div>}</section></div>
     <div className="section-heading"><div><span className="eyebrow">YOUR FOUNDATION</span><h2>项目事实库</h2></div><button className="text-button" onClick={() => setView("projects")}>管理项目 →</button></div><div className="project-strip">{projects.map((project) => <article className="project-mini" key={project.id}><div className="project-mini-top"><span className="project-symbol">{project.name.slice(0, 1)}</span><span className="count-badge">{project.facts.length} 条事实</span></div><h3>{project.name}</h3><p>{project.summary}</p><div className="stack-row">{project.stack.slice(0, 3).map((item) => <span key={item}>{item}</span>)}</div></article>)}</div>
   </div>;
 }
@@ -409,13 +488,14 @@ function ApplicationsView({ applications, addApplication, updateApplicationStatu
   const [openId, setOpenId] = useState<string | null>(null);
   const [resumeName, setResumeName] = useState("尚未上传原始简历");
   const [resumeHtml, setResumeHtml] = useState("");
+  useEffect(() => { void fetch("/api/resume").then((response) => response.json()).then(async (payload: { resume?: { fileName?: string; htmlContent?: string } | null }) => { if (payload.resume) { setResumeName(payload.resume.fileName ?? "已上传简历"); setResumeHtml(payload.resume.htmlContent ?? ""); return; } const legacy = window.localStorage.getItem("source-resume"); if (!legacy) return; try { const old = JSON.parse(legacy) as { fileName?: string; htmlContent?: string }; if (old.fileName && old.htmlContent) { setResumeName(old.fileName); setResumeHtml(old.htmlContent); await fetch("/api/resume", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(old) }); window.localStorage.removeItem("source-resume"); } } catch { /* discard malformed legacy cache */ } }).catch(() => undefined); }, []);
   const [draft, setDraft] = useState({ company: "", role: "", base: "", salary: "", jd: "" });
   const [match, setMatch] = useState<any>(null);
   const withSilent = markSilentApplications(applications, new Date("2026-11-11T12:00:00.000Z"), 7);
   function openApplication(application?: Application) { setOpenId(application?.id ?? "new"); setMatch(null); setDraft(application ? { company: application.company, role: application.role, base: "", salary: "", jd: "" } : { company: "", role: "", base: "", salary: "", jd: "" }); }
   async function analyze() { const response = await fetch("/api/llm", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ task: "resume_match", jd: draft.jd, resume: resumeName, projectContext: "已确认项目事实库" }) }); const payload = await response.json(); setMatch(payload.data ?? null); }
   async function pasteJdImage(event: React.ClipboardEvent<HTMLTextAreaElement>) { const clipboardFile = Array.from(event.clipboardData.files).find((file) => file.type.startsWith("image/")); const clipboardItem = Array.from(event.clipboardData.items).find((item) => item.type.startsWith("image/")); const file = clipboardFile ?? clipboardItem?.getAsFile(); if (!file) return; event.preventDefault(); const form = new FormData(); form.append("images", file, file.name || "pasted-jd.png"); const response = await fetch("/api/ocr", { method: "POST", body: form }); const payload = await response.json(); setDraft((current) => ({ ...current, company: payload.fields?.company || current.company, base: payload.fields?.base || current.base, salary: payload.fields?.salary || current.salary, jd: payload.fields?.jd || payload.text || current.jd })); }
-  return <div className="view-stack"><section className="panel original-resume-panel"><div><span className="eyebrow">SOURCE RESUME</span><h2>原始简历</h2><p>所有公司匹配度分析都以这一份简历为基础。</p></div><label className="resume-upload">↑ 上传或替换简历<input type="file" accept=".html,.txt" onChange={async (e) => { const file = e.target.files?.[0]; if (!file) return; const html = await file.text(); setResumeName(file.name); setResumeHtml(html); localStorage.setItem("source-resume", JSON.stringify({ fileName: file.name, htmlContent: html })); await fetch("/api/resume", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ fileName: file.name, htmlContent: html }) }); }} /></label><span className="resume-name">{resumeName}</span>{resumeHtml && <details className="resume-preview"><summary>预览 HTML 简历</summary><iframe title="原始简历预览" sandbox="allow-same-origin" srcDoc={resumeHtml} /></details>}</section><div className="toolbar-row"><div><strong>{applications.length} 个已投递机会</strong><span className="muted"> · 点击公司行查看详情</span></div><button className="primary-button" onClick={() => openApplication()}>＋ 添加投递</button></div><div className="panel table-panel"><div className="table-head"><span>公司 / 职位</span><span>状态</span><span>投递日期</span><span>简历版本</span><span /></div>{withSilent.map((application) => <button className="application-row clickable-row" key={application.id} onClick={() => openApplication(application)}><div className="company-cell"><div className="company-logo">{application.company.slice(0, 1)}</div><div><strong>{application.company}</strong><small>{application.role}</small></div></div><div onClick={(e) => e.stopPropagation()}><select value={application.status} onChange={(event) => updateApplicationStatus(application.id, event.target.value as ApplicationStatus)}>{(Object.keys(APPLICATION_STATUS_LABELS) as ApplicationStatus[]).map((status) => <option key={status} value={status}>{APPLICATION_STATUS_LABELS[status]}</option>)}</select>{application.silent && <span className="silent-chip">沉默 12d</span>}</div><span className="date-text">{application.appliedAt.slice(5, 10).replace("-", "/")}</span><span className="version-chip">v{application.status === "interviewing" ? "03" : "01"}</span><span className="icon-button">•••</span></button>)}</div>{openId && <div className="modal-backdrop" onClick={() => setOpenId(null)}><section className="application-modal" onClick={(e) => e.stopPropagation()}><div className="modal-head"><div><span className="eyebrow">APPLICATION DETAIL</span><h2>{openId === "new" ? "添加投递" : draft.company}</h2></div><button className="icon-button" onClick={() => setOpenId(null)}>×</button></div><div className="modal-grid"><label>公司名称<input value={draft.company} onChange={(e) => setDraft({ ...draft, company: e.target.value })} /></label><label>职位名称<input value={draft.role} onChange={(e) => setDraft({ ...draft, role: e.target.value })} /></label><label>公司 base 地<input value={draft.base} onChange={(e) => setDraft({ ...draft, base: e.target.value })} /></label><label>薪资范围<input value={draft.salary} onChange={(e) => setDraft({ ...draft, salary: e.target.value })} /></label></div><label className="modal-field">JD 内容<textarea value={draft.jd} onPaste={pasteJdImage} onChange={(e) => setDraft({ ...draft, jd: e.target.value })} placeholder="粘贴 JD 文字，或直接粘贴截图（⌘V / Ctrl+V）…" /></label><label className="multi-upload">↑ 上传 JD 截图（可多张）<input type="file" accept="image/*" multiple /></label><div className="modal-actions"><button className="secondary-button" onClick={() => setOpenId(null)}>保存信息</button><button className="primary-button" onClick={analyze}>生成匹配度和修改建议</button></div>{match && <div className="modal-match"><strong>匹配分析</strong>{match.gaps.map((gap: any) => <p key={gap.skill}><b>{gap.skill}</b> · {gap.reason} · 建议：{gap.suggestion}</p>)}</div>}</section></div>}</div>;
+  return <div className="view-stack"><section className="panel original-resume-panel"><div><span className="eyebrow">SOURCE RESUME</span><h2>原始简历</h2><p>所有公司匹配度分析都以这一份简历为基础。</p></div><label className="resume-upload">↑ 上传或替换简历<input type="file" accept=".html,.txt" onChange={async (e) => { const file = e.target.files?.[0]; if (!file) return; const html = await file.text(); setResumeName(file.name); setResumeHtml(html); await fetch("/api/resume", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ fileName: file.name, htmlContent: html }) }); }} /></label><span className="resume-name">{resumeName}</span>{resumeHtml && <details className="resume-preview"><summary>预览 HTML 简历</summary><iframe title="原始简历预览" sandbox="allow-same-origin" srcDoc={resumeHtml} /></details>}</section><div className="toolbar-row"><div><strong>{applications.length} 个已投递机会</strong><span className="muted"> · 点击公司行查看详情</span></div><button className="primary-button" onClick={() => openApplication()}>＋ 添加投递</button></div><div className="panel table-panel"><div className="table-head"><span>公司 / 职位</span><span>状态</span><span>投递日期</span><span>简历版本</span><span /></div>{withSilent.map((application) => <button className="application-row clickable-row" key={application.id} onClick={() => openApplication(application)}><div className="company-cell"><div className="company-logo">{application.company.slice(0, 1)}</div><div><strong>{application.company}</strong><small>{application.role}</small></div></div><div onClick={(e) => e.stopPropagation()}><select value={application.status} onChange={(event) => updateApplicationStatus(application.id, event.target.value as ApplicationStatus)}>{(Object.keys(APPLICATION_STATUS_LABELS) as ApplicationStatus[]).map((status) => <option key={status} value={status}>{APPLICATION_STATUS_LABELS[status]}</option>)}</select>{application.silent && <span className="silent-chip">沉默 12d</span>}</div><span className="date-text">{application.appliedAt.slice(5, 10).replace("-", "/")}</span><span className="version-chip">v{application.status === "interviewing" ? "03" : "01"}</span><span className="icon-button">•••</span></button>)}</div>{openId && <div className="modal-backdrop" onClick={() => setOpenId(null)}><section className="application-modal" onClick={(e) => e.stopPropagation()}><div className="modal-head"><div><span className="eyebrow">APPLICATION DETAIL</span><h2>{openId === "new" ? "添加投递" : draft.company}</h2></div><button className="icon-button" onClick={() => setOpenId(null)}>×</button></div><div className="modal-grid"><label>公司名称<input value={draft.company} onChange={(e) => setDraft({ ...draft, company: e.target.value })} /></label><label>职位名称<input value={draft.role} onChange={(e) => setDraft({ ...draft, role: e.target.value })} /></label><label>公司 base 地<input value={draft.base} onChange={(e) => setDraft({ ...draft, base: e.target.value })} /></label><label>薪资范围<input value={draft.salary} onChange={(e) => setDraft({ ...draft, salary: e.target.value })} /></label></div><label className="modal-field">JD 内容<textarea value={draft.jd} onPaste={pasteJdImage} onChange={(e) => setDraft({ ...draft, jd: e.target.value })} placeholder="粘贴 JD 文字，或直接粘贴截图（⌘V / Ctrl+V）…" /></label><label className="multi-upload">↑ 上传 JD 截图（可多张）<input type="file" accept="image/*" multiple /></label><div className="modal-actions"><button className="secondary-button" onClick={() => setOpenId(null)}>保存信息</button><button className="primary-button" onClick={analyze}>生成匹配度和修改建议</button></div>{match && <div className="modal-match"><strong>匹配分析</strong>{match.gaps.map((gap: any) => <p key={gap.skill}><b>{gap.skill}</b> · {gap.reason} · 建议：{gap.suggestion}</p>)}</div>}</section></div>}</div>;
 }
 
 function InterviewsView({ questions, generateQuestions, confirmQuestion }: { questions: Question[]; generateQuestions: (event: FormEvent<HTMLFormElement>) => void; confirmQuestion: (id: string) => void }) {
@@ -427,22 +507,6 @@ function InterviewsView({ questions, generateQuestions, confirmQuestion }: { que
 }
 
 function StudyView({ items, reviewStudyItem }: { items: StudyItem[]; reviewStudyItem: (id: string, score: number) => void }) { return <div className="view-stack"><div className="study-summary"><div><span className="eyebrow">TODAY'S REVIEW</span><h2>今天有 {items.length} 个学习条目</h2><p>每次评分都会计算下一次复习日期，低于 3 分会回到第一档。</p></div><div className="streak-card"><strong>06</strong><span>day streak</span></div></div><div className="study-list">{items.map((item) => <article className="panel study-card" key={item.id}><div className={`study-type ${item.type}`}>{item.type === "algo" ? "ALGO" : item.type === "project" ? "PROJECT" : "Q"}</div><div className="study-main"><div className="study-title-row"><h3>{item.title}</h3><span className="next-review">到期 {item.nextReviewAt}</span></div><div className="stage-track">{[0, 1, 2, 3, 4].map((stage) => <i className={stage <= item.stage ? "on" : ""} key={stage} />)}<span>阶段 {item.stage + 1} / 5</span></div></div><div className="review-actions"><span>本次掌握度</span><div>{[1, 2, 3, 4, 5].map((score) => <button key={score} onClick={() => reviewStudyItem(item.id, score)}>{score}</button>)}</div></div></article>)}</div></div>; }
-
-function PlannerAgentPanel() {
-  const [card, setCard] = useState("节制");
-  const [orientation, setOrientation] = useState<"正位" | "逆位">("正位");
-  const [mood, setMood] = useState("");
-  const [userPlan, setUserPlan] = useState("");
-  const [result, setResult] = useState<any>(null);
-  async function runPlanner() {
-    const response = await fetch("/api/llm", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ task: "planner", card, orientation, keywords: ["平衡", "节奏", "适度"], mood, userPlan, observations: ["近 8 天连续学习后完成率通常下降", "今天有 2 项复习到期", "排程由代码检查时间冲突"] }) });
-    const payload = await response.json();
-    if (payload.data) setResult({ ...payload.data, provider: payload.provider });
-  }
-  return <section className="panel planner-agent-panel"><div className="planner-agent-copy"><span className="eyebrow">REACT PLANNER AGENT</span><h2>先看牌面，再决定今天的节奏</h2><p>牌义会公开展示，只作为软性建议。你可以接受、修改或忽略它。</p><div className="planner-inputs"><select value={card} onChange={(e) => setCard(e.target.value)}><option>节制</option><option>隐者</option><option>星星</option></select><select value={orientation} onChange={(e) => setOrientation(e.target.value as "正位" | "逆位")}><option>正位</option><option>逆位</option></select><input value={mood} onChange={(e) => setMood(e.target.value)} placeholder="今天的心情或精力" /><input value={userPlan} onChange={(e) => setUserPlan(e.target.value)} placeholder="你想完成什么？" /><button className="primary-button" onClick={runPlanner}>生成建议</button></div></div>{result && <div className="planner-agent-result"><div className="tarot-summary"><strong>{card} · {orientation}</strong><span>{result.tarot.keywords.join(" · ")}</span></div><p className="planner-tone">{result.tone}</p>{result.observations.map((item: string) => <span className="planner-observation" key={item}>代码依据 · {item}</span>)}{result.suggestions.map((suggestion: any) => <button className="planner-suggestion" key={suggestion.text}><span>＋</span><div><strong>{suggestion.text}</strong><small>依据 · {suggestion.basis.join("、")} · 点击后加入待确认队列</small></div></button>)}<div className="planner-choice"><button>接受塔罗影响</button><button>调整建议</button><button>忽略塔罗影响</button><small>{result.provider === "ollama" ? "已使用本地 Ollama" : "本地模型未连接，当前为规则降级"}</small></div></div>}</section>;
-}
-
-function PlannerView({ tasks, addTask, toggleTask }: { tasks: PlannerTask[]; addTask: (event: FormEvent<HTMLFormElement>) => void; toggleTask: (id: string) => void }) { const result = scheduleTasks(tasks, { start: "09:00", end: "18:00" }); return <div className="view-stack"><PlannerAgentPanel /><div className="planner-head"><div><span className="eyebrow">WED · 11 NOV</span><h2>09:00 — 18:00 <span>· 7h 可用</span></h2><p>排程器不读取塔罗和日记，只使用任务、截止日和复习状态。</p></div><div className="time-window"><span>时间窗口</span><strong>09:00 — 18:00</strong><small>可在设置中调整</small></div></div><div className="planner-grid"><section className="panel schedule-panel"><PanelHeader title="已排入时间块" action={`${result.blocks.length} 项`} onAction={() => undefined} /><div className="schedule-list">{result.blocks.map((block) => <div className="schedule-row" key={block.id}><span className="schedule-time">{block.start}<small>{block.end}</small></span><div className={`schedule-bar ${block.kind}`} /><div className="schedule-content"><strong>{block.title}</strong><span>{block.reason}</span></div><span className="schedule-duration">{block.durationMinutes}m</span></div>)}</div>{result.unscheduled.length > 0 && <div className="unscheduled"><strong>顺延 {result.unscheduled.length} 项</strong>{result.unscheduled.map(({ task, reason }) => <span key={task.id}>{task.title} · {reason}</span>)}</div>}</section><section className="panel add-task-panel"><span className="eyebrow">ADD TASK</span><h2>加入今天</h2><form onSubmit={addTask}><input name="title" placeholder="要完成什么？" /><div className="form-row"><input name="duration" type="number" min="5" step="5" placeholder="分钟" /><select name="kind" defaultValue="other"><option value="interview">面试准备</option><option value="deadline">截止日期</option><option value="follow_up">投递跟进</option><option value="daily_study">固定学习</option><option value="review">到期复习</option><option value="other">其他</option></select></div><button className="primary-button full">加入排程</button></form><div className="task-queue"><strong>待办队列</strong>{tasks.map((task) => <label key={task.id} className={task.completed ? "completed" : ""}><input type="checkbox" checked={task.completed ?? false} onChange={() => toggleTask(task.id)} /><span>{task.title}</span><small>{task.durationMinutes}m</small></label>)}</div></section></div></div>; }
 
 function ReflectionView({ diary, setDiary, diaryAllowed, setDiaryAllowed, flash }: { diary: string; setDiary: (value: string) => void; diaryAllowed: boolean; setDiaryAllowed: (value: boolean) => void; flash: (message: string) => void }) { const [card, setCard] = useState(""); const [orientation, setOrientation] = useState("正位"); const [reflection, setReflection] = useState<{ summary: string; question: string; smallThings: string[] } | null>(null); async function generate() { if (!card) { flash("今天还没有抽牌，请先选择或抽取一张牌"); return; } if (detectCareSignal(diary)) { setReflection({ summary: "我看到你正在经历一段很难受的时间。先把今天缩小到一个安全、具体的动作，联系你信任的人陪你一起度过。", question: "现在有谁可以陪你说说话？", smallThings: ["给信任的人发一条消息", "先喝水并离开让你不舒服的环境"] }); flash("检测到需要关怀的表达，已停止塔罗式解读"); return; } if (!diaryAllowed) { setReflection({ summary: "状态未允许送入模型，今天只展示牌义关键词。", question: "如果只看今天，你最想保留什么？", smallThings: ["完成一个最小任务"] }); flash("状态已保存，但不会进入模型分析"); return; } try { const response = await fetch("/api/llm", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ task: "reflection", diary, card, orientation }) }); const payload = await response.json() as { summary?: string; question?: string; smallThings?: string[]; provider?: string }; if (payload.summary && payload.question && payload.smallThings) { setReflection({ summary: payload.summary, question: payload.question, smallThings: payload.smallThings }); flash(payload.provider === "ollama" ? "已使用本地模型生成反思" : "本地模型未连接，已使用规则降级"); return; } } catch { flash("本地模型未连接，已使用规则降级"); } setReflection({ summary: `你在「${card} · ${orientation}」的提示下，把注意力放回正在推进的事情。今天可以继续保留这种节奏，让行动比结论更早发生。`, question: "今天哪一个小动作会让明天的你更轻松？", smallThings: ["先复盘一个已确认事实", "给一项投递写跟进草稿", "留出 20 分钟不看消息"] }); } return <div className="view-stack"><div className="reflection-grid"><section className="panel diary-panel"><div className="panel-header"><h2>今天的状态</h2><span className="privacy-pill">{diaryAllowed ? "允许分析" : "仅保存"}</span></div><textarea value={diary} onChange={(event) => setDiary(event.target.value)} placeholder="写下今天发生了什么，或者只记一件让你在意的事…" /><div className="diary-controls"><label className="toggle-row"><input type="checkbox" checked={diaryAllowed} onChange={(event) => setDiaryAllowed(event.target.checked)} /><span className="toggle" />允许送入模型</label><span className="muted">原始状态会永久保留</span></div></section><section className="panel tarot-panel"><span className="eyebrow">YOUR CARD</span><h2>今天抽到什么牌？</h2><div className="tarot-card"><div className="tarot-sun">✦</div><strong>{card}</strong><span>{orientation}</span></div><div className="form-row"><select value={card} onChange={(event) => setCard(event.target.value)}><option value="">请选择今天的牌</option><option>权杖六</option><option>节制</option><option>隐者</option><option>星星</option></select><select value={orientation} onChange={(event) => setOrientation(event.target.value)}><option>正位</option><option>逆位</option></select></div><button className="primary-button full" onClick={generate}>生成今日反思</button></section></div>{reflection && <section className="panel reflection-result"><div className="result-top"><span className="eyebrow">REFLECTION · {card} {orientation}</span><span className="safe-badge">✓ 已通过边界检查</span></div><p className="reflection-summary">{reflection.summary}</p><div className="question-prompt"><span>给自己的问题</span><strong>{reflection.question}</strong></div><div className="small-things"><span>今天可以关注的小事</span><div>{reflection.smallThings.map((thing) => <button key={thing} onClick={() => flash("已加入待确认队列")}><i>＋</i>{thing}</button>)}</div></div></section>}<div className="boundary-note"><span>⌁</span><div><strong>边界提醒</strong><p>牌义只用于反思，不预测录用、金钱或身体结果。生成内容会经过结构校验，写入待办前需要你确认。</p></div></div></div>; }
 
