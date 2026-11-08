@@ -1,4 +1,4 @@
-import { interviewExtractionSchema, reflectionSchema } from "./schemas";
+import { interviewExtractionSchema, plannerSuggestionSchema, reflectionSchema } from "./schemas";
 
 type ChatMessage = { role: "system" | "user"; content: string };
 
@@ -71,4 +71,25 @@ function fallbackReflection(input: { diary: string; card: string; orientation: s
 
 export function llmConfig() {
   return { baseUrl: OLLAMA_URL, model: OLLAMA_MODEL, provider: "ollama" as const };
+}
+
+export async function generatePlannerSuggestion(input: { card: string; orientation: "正位" | "逆位"; keywords: string[]; userPlan: string; mood: string; observations: string[] }): Promise<LlmResult<ReturnType<typeof plannerSuggestionSchema.parse>>> {
+  const fallback = plannerSuggestionSchema.parse({
+    tarot: { card: input.card, orientation: input.orientation, keywords: input.keywords },
+    observations: input.observations,
+    suggestions: [
+      { text: "把今天的学习拆成两个 45 分钟区块，中间安排休息。", basis: ["learning_trend", "schedule"], requiresConfirmation: true },
+      { text: "先完成一个最小任务，再决定是否增加学习量。", basis: ["user_input", "tarot"], requiresConfirmation: true }
+    ],
+    tone: "今天先照顾节奏，再推进一个具体的小目标。",
+    safetyChecked: true
+  });
+  try {
+    return await chatJson([
+      { role: "system", content: "你是一个受限的 ReAct 规划助手。历史趋势、任务优先级和时间冲突由代码提供并且不可改写。塔罗牌只提供可见的软性建议，不能预测结果。只输出 JSON，字段为 tarot、observations、suggestions、tone、safetyChecked。每条 suggestion 的 requiresConfirmation 必须为 true，basis 只能使用 learning_trend、user_input、tarot、schedule。" },
+      { role: "user", content: JSON.stringify({ tarot: { card: input.card, orientation: input.orientation, keywords: input.keywords }, userPlan: input.userPlan, mood: input.mood, observations: input.observations }) }
+    ], (value) => plannerSuggestionSchema.parse(value));
+  } catch (error) {
+    return { data: fallback, provider: "fallback", model: OLLAMA_MODEL, error: error instanceof Error ? error.message : "本地模型调用失败" };
+  }
 }

@@ -24,6 +24,15 @@ export const reflectionSchema = z.object({
   safetyChecked: z.literal(true)
 });
 
+export const plannerSuggestionSchema = z.object({
+  tarot: z.object({ card: z.string(), orientation: z.enum(["正位", "逆位"]), keywords: z.array(z.string()) }),
+  observations: z.array(z.string()),
+  suggestions: z.array(z.object({ text: z.string(), basis: z.array(z.enum(["learning_trend", "user_input", "tarot", "schedule"])), requiresConfirmation: z.literal(true) })),
+  tone: z.string().min(1),
+  safetyChecked: z.literal(true)
+});
+
 export type SkillGap = z.infer<typeof skillGapSchema>;
 export type InterviewExtraction = z.infer<typeof interviewExtractionSchema>;
 export type Reflection = z.infer<typeof reflectionSchema>;
+export type PlannerSuggestion = z.infer<typeof plannerSuggestionSchema>;
