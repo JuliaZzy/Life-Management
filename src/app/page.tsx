@@ -16,6 +16,7 @@ import {
   scheduleTasks,
   transitionApplication
 } from "@/lib/domain";
+import { drawTarot, shuffleTarot, TarotDraw } from "@/lib/tarot";
 
 type ViewKey = "overview" | "projects" | "applications" | "interviews" | "study" | "planner" | "reflection" | "memory";
 
@@ -137,6 +138,7 @@ export default function HomePage() {
   const [diary, setDiary] = useState("");
   const [diaryAllowed, setDiaryAllowed] = useState(true);
   const [toast, setToast] = useState("");
+  const [showTodayPlan, setShowTodayPlan] = useState(false);
 
   useEffect(() => {
     const saved = window.localStorage.getItem("life-management-demo");
@@ -293,7 +295,7 @@ export default function HomePage() {
       </aside>
 
       <section className="main-column">
-        <header className="topbar"><div className="breadcrumb"><span>工作台</span><b>/</b><strong>{current.title}</strong></div><div className="topbar-actions"><span className="sync"><i /> 数据已保存</span><button className="icon-button" onClick={() => flash("快捷键面板即将开放")}>⌘</button><button className="primary-button small" onClick={() => setView("planner")}>＋ 添加记录</button></div></header>
+        <header className="topbar"><div className="breadcrumb"><span>工作台</span><b>/</b><strong>{current.title}</strong></div><div className="topbar-actions"><span className="sync"><i /> 数据已保存</span><button className="icon-button" onClick={() => flash("快捷键面板即将开放")}>⌘</button><button className="primary-button small" onClick={() => setShowTodayPlan(true)}>＋ 今日计划</button></div></header>
         <div className="content-wrap">
           <div className="page-intro"><div><span className="eyebrow">{current.eyebrow}</span><h1>{current.title}</h1><p>{current.description}</p></div>{view === "overview" && <div className="date-chip"><span>今日</span><strong>{todayLabel()}</strong></div>}</div>
           {view === "overview" && <OverviewView applications={applications} tasks={tasks} projects={projects} doneCount={doneCount} confirmedFacts={confirmedFacts} silentCount={silentCount} setView={setView} />}
@@ -307,8 +309,19 @@ export default function HomePage() {
         </div>
       </section>
       {toast && <div className="toast" role="status"><span>✓</span>{toast}</div>}
+      {showTodayPlan && <TodayPlanModal onClose={() => setShowTodayPlan(false)} />}
     </main>
   );
+}
+
+function TodayPlanModal({ onClose }: { onClose: () => void }) {
+  const [cards, setCards] = useState(() => shuffleTarot());
+  const [draw, setDraw] = useState<TarotDraw | null>(null);
+  const [plan, setPlan] = useState("");
+  const today = new Date().toISOString().slice(0, 10);
+  const stored = typeof window === "undefined" ? null : window.localStorage.getItem("today-tarot");
+  function drawToday() { if (stored) { setDraw(JSON.parse(stored)); return; } const next = drawTarot(cards, today); localStorage.setItem("today-tarot", JSON.stringify(next)); setDraw(next); }
+  return <div className="modal-backdrop" onClick={onClose}><section className="today-plan-modal" onClick={(e) => e.stopPropagation()}><div className="modal-head"><div><span className="eyebrow">TODAY PLAN</span><h2>今天的计划</h2></div><button className="icon-button" onClick={onClose}>×</button></div><div className="today-plan-grid"><div className="today-tarot-side"><div className="tarot-draw-slot">{draw ? <><strong>{draw.name}</strong><span>{draw.orientation === "upright" ? "正位" : "逆位"}</span></> : <span>＋</span>}</div><div className="tarot-actions"><button className="secondary-button" onClick={() => setCards(shuffleTarot())}>洗牌</button><button className="primary-button" onClick={drawToday}>抽牌</button></div><small>每天只能确认一次抽牌，洗牌不会自动抽牌。</small></div><div className="today-plan-input"><label>你今天想完成什么？<textarea value={plan} onChange={(e) => setPlan(e.target.value)} placeholder="例如：复习两道题，下午出去走走…" /></label><button className="primary-button full" onClick={() => { localStorage.setItem(`today-plan-${today}`, plan); onClose(); }}>保存并交给规划 Agent</button></div></div></section></div>;
 }
 
 function OverviewView({ applications, tasks, projects, doneCount, confirmedFacts, silentCount, setView }: { applications: Application[]; tasks: PlannerTask[]; projects: Project[]; doneCount: number; confirmedFacts: number; silentCount: number; setView: (view: ViewKey) => void }) {
