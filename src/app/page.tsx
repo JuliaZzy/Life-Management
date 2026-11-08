@@ -323,7 +323,7 @@ export default function HomePage() {
       <section className="main-column">
         <header className="topbar"><div className="breadcrumb"><span>工作台</span><b>/</b><strong>{current.title}</strong></div><div className="topbar-actions"><span className="sync"><i /> 数据已保存</span><button className="icon-button" onClick={() => flash("快捷键面板即将开放")}>⌘</button><button className="primary-button small" onClick={() => setShowTodayPlan(true)}>＋ 今日计划</button></div></header>
         <div className="content-wrap">
-          <div className="page-intro"><div><span className="eyebrow">{current.eyebrow}</span><h1>{view === "overview" ? (plannerSnapshot?.tone ?? "今天的牌面，正在等待你的下一步") : current.title}</h1>{view !== "overview" && <p>{current.description}</p>}</div>{view === "overview" && <div className="date-chip"><span>今日</span><strong>{todayLabel()}</strong></div>}</div>
+          <div className="page-intro"><div><span className="eyebrow">{current.eyebrow}</span><h1>{view === "overview" ? (plannerSnapshot?.tone ?? "一张牌，一个计划，今天从这里开始...") : current.title}</h1>{view !== "overview" && <p>{current.description}</p>}</div>{view === "overview" && <div className="date-chip"><span>今日</span><strong>{todayLabel()}</strong></div>}</div>
           {view === "overview" && <OverviewView applications={applications} tasks={tasks} projects={projects} doneCount={doneCount} confirmedFacts={confirmedFacts} silentCount={silentCount} setView={setView} plannerSnapshot={plannerSnapshot} diary={diary} />}
           {view === "projects" && <ProjectsView projects={projects} addProject={addProject} confirmFact={confirmFact} />}
           {view === "applications" && <ApplicationsView applications={applications} addApplication={addApplication} updateApplicationStatus={updateApplicationStatus} />}
