@@ -16,7 +16,7 @@ import {
   scheduleTasks,
   transitionApplication
 } from "@/lib/domain";
-import { drawTarot, shuffleTarot, TarotDraw } from "@/lib/tarot";
+import { drawTarot, shuffleTarot, tarotDeck, TarotDraw } from "@/lib/tarot";
 
 type ViewKey = "overview" | "projects" | "applications" | "interviews" | "study" | "planner" | "reflection" | "memory";
 
@@ -327,11 +327,15 @@ export default function HomePage() {
 function TodayPlanModal({ onClose }: { onClose: () => void }) {
   const [cards, setCards] = useState(() => shuffleTarot());
   const [draw, setDraw] = useState<TarotDraw | null>(null);
+  const [selectedId, setSelectedId] = useState("");
+  const [selectedOrientation, setSelectedOrientation] = useState<"upright" | "reversed">("upright");
   const [plan, setPlan] = useState("");
   const today = new Date().toISOString().slice(0, 10);
   const stored = typeof window === "undefined" ? null : window.localStorage.getItem("today-tarot");
-  function drawToday() { if (stored) { setDraw(JSON.parse(stored)); return; } const next = drawTarot(cards, today); localStorage.setItem("today-tarot", JSON.stringify(next)); setDraw(next); }
-  return <div className="modal-backdrop" onClick={onClose}><section className="today-plan-modal" onClick={(e) => e.stopPropagation()}><div className="modal-head"><div><span className="eyebrow">TODAY PLAN</span><h2>今天的计划</h2></div><button className="icon-button" onClick={onClose}>×</button></div><div className="today-plan-grid"><div className="today-tarot-side"><div className="tarot-draw-slot">{draw ? <><strong>{draw.name}</strong><span>{draw.orientation === "upright" ? "正位" : "逆位"}</span></> : <span>＋</span>}</div><div className="tarot-actions"><button className="secondary-button" onClick={() => setCards(shuffleTarot())}>洗牌</button><button className="primary-button" onClick={drawToday}>抽牌</button></div><small>每天只能确认一次抽牌，洗牌不会自动抽牌。</small></div><div className="today-plan-input"><label>你今天想完成什么？<textarea value={plan} onChange={(e) => setPlan(e.target.value)} placeholder="例如：复习两道题，下午出去走走…" /></label><button className="primary-button full" onClick={() => { localStorage.setItem(`today-plan-${today}`, plan); onClose(); }}>保存并交给规划 Agent</button></div></div></section></div>;
+  function drawToday() { if (stored) { const saved = JSON.parse(stored); setDraw(saved); setSelectedId(saved.id); setSelectedOrientation(saved.orientation); return; } const next = drawTarot(cards, today); localStorage.setItem("today-tarot", JSON.stringify(next)); setDraw(next); setSelectedId(next.id); setSelectedOrientation(next.orientation); }
+  const selectedCard = tarotDeck.find((card) => card.id === selectedId);
+  const visibleCard = selectedCard ? { ...selectedCard, orientation: selectedOrientation } : draw;
+  return <div className="modal-backdrop" onClick={onClose}><section className="today-plan-modal" onClick={(e) => e.stopPropagation()}><div className="modal-head"><div><span className="eyebrow">TODAY PLAN</span><h2>今天的计划</h2></div><button className="icon-button" onClick={onClose}>×</button></div><div className="today-plan-grid"><div className="today-tarot-side"><div className="tarot-draw-slot">{visibleCard ? <><img src={visibleCard.image} alt={visibleCard.name} /><strong>{visibleCard.name}</strong><span>{visibleCard.orientation === "upright" ? "正位" : "逆位"}</span></> : <span>＋</span>}</div><select className="tarot-select" value={selectedId} onChange={(e) => setSelectedId(e.target.value)}><option value="">选择你抽到的牌</option>{tarotDeck.map((card) => <option key={card.id} value={card.id}>{card.name}</option>)}</select><select className="tarot-select" value={selectedOrientation} onChange={(e) => setSelectedOrientation(e.target.value as "upright" | "reversed")}><option value="upright">正位</option><option value="reversed">逆位</option></select><div className="tarot-actions"><button className="secondary-button" onClick={() => setCards(shuffleTarot())}>洗牌</button><button className="primary-button" onClick={drawToday}>抽牌</button></div><small>可以手动选择你抽到的牌，也可以让系统抽牌。</small></div><div className="today-plan-input"><label>你今天想完成什么？<textarea value={plan} onChange={(e) => setPlan(e.target.value)} placeholder="例如：复习两道题，下午出去走走…" /></label><button className="primary-button full" onClick={() => { localStorage.setItem(`today-plan-${today}`, plan); onClose(); }}>保存并交给规划 Agent</button></div></div></section></div>;
 }
 
 function OverviewView({ applications, tasks, projects, doneCount, confirmedFacts, silentCount, setView }: { applications: Application[]; tasks: PlannerTask[]; projects: Project[]; doneCount: number; confirmedFacts: number; silentCount: number; setView: (view: ViewKey) => void }) {
