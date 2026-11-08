@@ -10,6 +10,7 @@ import {
   scheduleTasks,
   transitionApplication
 } from "./domain";
+import { drawTarot, shuffleTarot } from "./tarot";
 
 describe("application state machine", () => {
   it("accepts the normal forward path and rejects backwards transitions", () => {
@@ -51,6 +52,12 @@ describe("SM-2 and deterministic scoring", () => {
 });
 
 describe("planner and reflection boundaries", () => {
+  it("creates a fixed 78-card shuffle and a daily draw", () => {
+    const shuffled = shuffleTarot(0.42);
+    expect(shuffled).toHaveLength(78);
+    expect(new Set(shuffled.map((card) => card.id)).size).toBe(78);
+    expect(["upright", "reversed"]).toContain(drawTarot(shuffled, "2026-11-08").orientation);
+  });
   it("prioritizes interviews and never overlaps blocks", () => {
     const result = scheduleTasks([
       { id: "other", title: "其他", durationMinutes: 60, kind: "other" },
