@@ -104,3 +104,4 @@ button { cursor: pointer; }
 /* A4 resume preview */
 .resume-preview { background:#eef0f3; padding:18px; overflow:auto; }.resume-preview iframe { width:210mm; min-width:210mm; height:297mm; min-height:297mm; display:block; margin:0 auto; border:0; background:#fff; box-shadow:0 10px 28px rgba(30,34,45,.12); }
 @media (max-width:720px) { .resume-preview { padding:10px; }.resume-preview iframe { transform-origin:top left; transform:scale(.78); margin-bottom:-230px; } }
+.modal-field textarea:focus { border-color:#e89a8a; box-shadow:0 0 0 3px #fff1ed; }
