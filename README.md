@@ -29,6 +29,17 @@ pnpm dev
 
 可以用 `pnpm llm:check` 检查服务和模型是否已就绪。`scripts/setup-local-llm.sh` 也保留了本地安装后的启动顺序。
 
+### 启动本地 OCR
+
+```bash
+python3 -m venv .venv-ocr
+source .venv-ocr/bin/activate
+pip install -r requirements-ocr.txt
+uvicorn scripts.paddle_ocr_service:app --host 127.0.0.1 --port 8001
+```
+
+OCR 服务使用 PaddleOCR 识字，再调用本地 `qwen2.5:3b` 只提取公司、base 地、JD 和薪资范围。
+
 如果需要接数据库，先启动 `docker compose up -d`，再把 `DATABASE_URL` 指向本地 PostgreSQL，并使用 Drizzle Kit 生成迁移。
 
 ## 验证
