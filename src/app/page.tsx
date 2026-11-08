@@ -174,7 +174,7 @@ export default function HomePage() {
 
   useEffect(() => {
     const loadPlannerSnapshot = () => {
-      const stored = window.localStorage.getItem("today-planner-result");
+      const stored = window.localStorage.getItem(`today-planner-result-${new Date().toISOString().slice(0, 10)}`);
       setPlannerSnapshot(stored ? JSON.parse(stored) as PlannerSnapshot : null);
     };
     loadPlannerSnapshot();
@@ -344,7 +344,8 @@ function TodayPlanModal({ onClose }: { onClose: () => void }) {
   const [cards, setCards] = useState(() => shuffleTarot());
   const today = new Date().toISOString().slice(0, 10);
   const storedDraw = typeof window === "undefined" ? null : window.localStorage.getItem("today-tarot");
-  const initialDraw = storedDraw ? JSON.parse(storedDraw) as TarotDraw : null;
+  const parsedDraw = storedDraw ? JSON.parse(storedDraw) as TarotDraw : null;
+  const initialDraw = parsedDraw?.date === today ? parsedDraw : null;
   const [draw, setDraw] = useState<TarotDraw | null>(initialDraw);
   const [selectedId, setSelectedId] = useState(initialDraw?.id ?? "");
   const [selectedOrientation, setSelectedOrientation] = useState<"upright" | "reversed">(initialDraw?.orientation ?? "upright");
@@ -359,7 +360,7 @@ function TodayPlanModal({ onClose }: { onClose: () => void }) {
     if (chosen) {
       const response = await fetch("/api/llm", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ task: "planner", card: chosen.name, orientation: chosen.orientation === "upright" ? "正位" : "逆位", keywords: chosen.keywords, userPlan: plan, mood: "", observations: ["今日事项与历史趋势由代码汇总"] }) });
       const payload = await response.json() as { data?: PlannerSnapshot };
-      if (payload.data) localStorage.setItem("today-planner-result", JSON.stringify(payload.data));
+      if (payload.data) localStorage.setItem(`today-planner-result-${today}`, JSON.stringify(payload.data));
     }
     window.dispatchEvent(new Event("today-plan-updated"));
     onClose();
