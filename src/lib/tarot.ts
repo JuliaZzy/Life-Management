@@ -4,6 +4,8 @@ export type TarotCard = { id: string; name: string; image: string; keywords: str
 
 export type TarotDraw = TarotCard & { position: number; orientation: TarotOrientation; date: string };
 
+export { describeTarotCard } from "./tarot-readings";
+
 const majorNames = ["愚人", "魔术师", "女祭司", "皇后", "皇帝", "教皇", "恋人", "战车", "力量", "隐者", "命运之轮", "正义", "倒吊人", "死神", "节制", "恶魔", "塔", "星星", "月亮", "太阳", "审判", "世界"];
 const suits = ["权杖", "圣杯", "宝剑", "星币"];
 const majorFiles = [

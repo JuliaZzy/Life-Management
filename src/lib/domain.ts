@@ -7,6 +7,16 @@ export type Application = {
   status: ApplicationStatus;
   appliedAt: string;
   lastContactAt?: string;
+  resumeVersion: string;
+  base?: string;
+  salary?: string;
+  jobDescription?: string;
+  matchAnalysis?: {
+    scores?: ResumeMatchScores;
+    highlights?: string[];
+    gaps?: { skill: string; evidence?: string; reason?: string; suggestion?: string }[];
+    safetyChecked?: boolean;
+  } | null;
   silent?: boolean;
 };
 
@@ -39,6 +49,7 @@ export function transitionApplication(application: Application, to: ApplicationS
     ...application,
     status: to,
     lastContactAt: changedAt,
+    resumeVersion: application.company,
     silent: false
   };
 }

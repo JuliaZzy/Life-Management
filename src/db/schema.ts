@@ -30,14 +30,18 @@ export const resumeSources = pgTable("resume_sources", {
 });
 
 export const applications = pgTable("applications", {
-  id: uuid("id").defaultRandom().primaryKey(),
+  id: text("id").primaryKey(),
   company: text("company").notNull(),
   role: text("role").notNull(),
+  base: text("base").notNull().default(""),
+  salary: text("salary").notNull().default(""),
   jobDescription: text("job_description").notNull().default(""),
   status: text("status").notNull().default("applied"),
   appliedAt: timestamp("applied_at", { withTimezone: true }).notNull(),
   lastContactAt: timestamp("last_contact_at", { withTimezone: true }),
-  resumeVersionId: uuid("resume_version_id")
+  resumeVersion: text("resume_version").notNull().default(""),
+  resumeVersionId: uuid("resume_version_id"),
+  matchAnalysis: jsonb("match_analysis")
 });
 
 export const skillGaps = pgTable("skill_gaps", {
@@ -107,6 +111,30 @@ export const dailyReflections = pgTable("daily_reflections", {
   snapshot: jsonb("snapshot").notNull(),
   generatedContent: jsonb("generated_content"),
   confirmed: boolean("confirmed").notNull().default(false)
+});
+
+export const dailyPlans = pgTable("daily_plans", {
+  planDate: date("plan_date").primaryKey(),
+  body: text("body").notNull().default(""),
+  plannerSnapshot: jsonb("planner_snapshot"),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull()
+});
+
+export const dailyTarot = pgTable("daily_tarot", {
+  drawDate: date("draw_date").primaryKey(),
+  cardId: text("card_id").notNull(),
+  cardName: text("card_name").notNull(),
+  image: text("image").notNull(),
+  orientation: text("orientation").notNull(),
+  position: integer("position").notNull(),
+  keywords: text("keywords").array().notNull().default([]),
+  createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull()
+});
+
+export const appState = pgTable("app_state", {
+  id: text("id").primaryKey(),
+  state: jsonb("state").notNull().default({}),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull()
 });
 
 export const events = pgTable("events", {

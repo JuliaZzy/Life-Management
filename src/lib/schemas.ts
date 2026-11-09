@@ -32,7 +32,16 @@ export const plannerSuggestionSchema = z.object({
   safetyChecked: z.literal(true)
 });
 
+export const resumeMatchScoreSchema = z.object({
+  skillCoverage: z.number().int().min(1).max(5),
+  evidence: z.number().int().min(1).max(5),
+  keywordMatch: z.number().int().min(1).max(5),
+  relevance: z.number().int().min(1).max(5),
+  clarity: z.number().int().min(1).max(5)
+});
+
 export const resumeMatchSchema = z.object({
+  scores: resumeMatchScoreSchema.optional(),
   gaps: z.array(z.object({ skill: z.string(), evidence: z.string(), reason: z.string(), suggestion: z.string() })),
   highlights: z.array(z.string()),
   safetyChecked: z.literal(true)

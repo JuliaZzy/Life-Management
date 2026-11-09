@@ -1,10 +1,12 @@
 "use client";
 
-import { FormEvent, useEffect, useMemo, useState } from "react";
+import { ChangeEvent, FormEvent, useEffect, useMemo, useState } from "react";
 import {
   APPLICATION_STATUS_LABELS,
   Application,
   ApplicationStatus,
+  areExactDuplicateQuestions,
+  calculateResumeMatchScore,
   calculateSm2,
   calculateWeightedScore,
   canTransitionApplication,
@@ -12,10 +14,10 @@ import {
   detectCareSignal,
   markSilentApplications,
   PlannerTask,
-  RubricScores,
-  transitionApplication
+  ResumeMatchScores,
+  RubricScores
 } from "@/lib/domain";
-import { drawTarot, shuffleTarot, tarotDeck, TarotDraw } from "@/lib/tarot";
+import { describeTarotCard, drawTarot, shuffleTarot, tarotDeck, TarotDraw } from "@/lib/tarot";
 
 type ViewKey = "overview" | "projects" | "applications" | "interviews" | "study" | "memory";
 
@@ -38,11 +40,20 @@ type StudyItem = {
 type Question = {
   id: string;
   text: string;
-  category: string;
-  source: "real" | "web";
-  answerBasis: "项目事实" | "通用知识" | "答题框架";
-  confirmed: boolean;
+  answer: string;
+  /** @deprecated 保留字段便于旧数据兼容，界面不再展示 */
+  category?: string;
+  source?: "real" | "web";
+  answerBasis?: "项目事实" | "通用知识" | "答题框架";
+  confirmed?: boolean;
 };
+
+function normalizeQuestionRecord(question: Question): Question {
+  return {
+    ...question,
+    answer: typeof question.answer === "string" ? question.answer : ""
+  };
+}
 
 type MemorySuggestion = { id: string; text: string; source: string; status: "待确认" | "已确认" | "已拒绝" };
 type PlannerSnapshot = {
@@ -55,6 +66,13 @@ type PlannerSnapshot = {
 type OverviewStats = {
   todayApplications: number;
   todayInterviews: number;
+};
+
+type OcrPayload = {
+  text?: string;
+  fallback?: boolean;
+  message?: string;
+  fields?: Partial<Record<"company" | "role" | "base" | "jd" | "salary", string>>;
 };
 
 const NAV_ITEMS: { key: ViewKey; label: string; short: string }[] = [
@@ -99,12 +117,6 @@ const seedProjects: Project[] = [
   }
 ];
 
-const seedApplications: Application[] = [
-  { id: "a-1", company: "远山数据", role: "全栈工程师", status: "interviewing", appliedAt: "2026-11-04T10:00:00.000Z", lastContactAt: "2026-11-06T09:00:00.000Z" },
-  { id: "a-2", company: "北极星科技", role: "前端工程师", status: "applied", appliedAt: "2026-10-30T10:00:00.000Z" },
-  { id: "a-3", company: "松果实验室", role: "产品工程师", status: "contacting", appliedAt: "2026-10-24T10:00:00.000Z", lastContactAt: "2026-11-05T11:00:00.000Z" }
-];
-
 const seedTasks: PlannerTask[] = [
   { id: "t-1", title: "准备远山数据技术一面复盘", durationMinutes: 60, kind: "interview", dueDate: "2026-11-11" },
   { id: "t-2", title: "给北极星科技发一次跟进", durationMinutes: 25, kind: "follow_up", dueDate: "2026-11-11" },
@@ -119,9 +131,9 @@ const seedStudy: StudyItem[] = [
 ];
 
 const seedQuestions: Question[] = [
-  { id: "q-1", text: "你的多 Agent 项目里，为什么报表不用 ReAct？", category: "agent", source: "real", answerBasis: "项目事实", confirmed: true },
-  { id: "q-2", text: "如何保证模型生成的简历没有编造？", category: "工程判断", source: "real", answerBasis: "项目事实", confirmed: false },
-  { id: "q-3", text: "RAG 怎么评估？", category: "LLM", source: "web", answerBasis: "通用知识", confirmed: true }
+  { id: "q-1", text: "你的多 Agent 项目里，为什么报表不用 ReAct？", answer: "" },
+  { id: "q-2", text: "如何保证模型生成的简历没有编造？", answer: "" },
+  { id: "q-3", text: "RAG 怎么评估？", answer: "" }
 ];
 
 const initialSuggestions: MemorySuggestion[] = [
@@ -144,6 +156,59 @@ function todayDateKey(timeZone: string) {
   return `${values.year}-${values.month}-${values.day}`;
 }
 
+function padTimePart(value: number) {
+  return String(value).padStart(2, "0");
+}
+
+function localDateTimeParts(iso?: string) {
+  const date = iso ? new Date(iso) : new Date();
+  const source = Number.isNaN(date.getTime()) ? new Date() : date;
+  return {
+    date: `${source.getFullYear()}-${padTimePart(source.getMonth() + 1)}-${padTimePart(source.getDate())}`,
+    time: `${padTimePart(source.getHours())}:${padTimePart(source.getMinutes())}`
+  };
+}
+
+function appliedAtIso(date: string, time: string) {
+  if (!date) return null;
+  const parsed = new Date(`${date}T${time || "00:00"}`);
+  return Number.isNaN(parsed.getTime()) ? null : parsed.toISOString();
+}
+
+function formatAppliedList(iso: string) {
+  const date = new Date(iso);
+  if (Number.isNaN(date.getTime())) return "";
+  return `${padTimePart(date.getMonth() + 1)}/${padTimePart(date.getDate())} ${padTimePart(date.getHours())}:${padTimePart(date.getMinutes())}`;
+}
+
+function isImageFile(file: File) {
+  return file.type.startsWith("image/") || /\.(avif|bmp|gif|heic|jpe?g|png|tiff?|webp)$/i.test(file.name);
+}
+
+function htmlToPlainText(html: string) {
+  return html
+    .replace(/<script[\s\S]*?<\/script>/gi, " ")
+    .replace(/<style[\s\S]*?<\/style>/gi, " ")
+    .replace(/<[^>]+>/g, " ")
+    .replace(/&nbsp;/gi, " ")
+    .replace(/&amp;/gi, "&")
+    .replace(/&lt;/gi, "<")
+    .replace(/&gt;/gi, ">")
+    .replace(/&#39;/gi, "'")
+    .replace(/&quot;/gi, '"')
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function clipboardImageFiles(event: React.ClipboardEvent<HTMLTextAreaElement>) {
+  const itemFiles = Array.from(event.clipboardData?.items ?? [])
+    .filter((item) => item.kind === "file" && item.type.startsWith("image/"))
+    .map((item) => item.getAsFile())
+    .filter((file): file is File => Boolean(file));
+  if (itemFiles.length) return itemFiles;
+  return Array.from(event.clipboardData?.files ?? []).filter(isImageFile);
+}
+
 export default function HomePage() {
   const [view, setView] = useState<ViewKey>(() => {
     if (typeof window === "undefined") return "overview";
@@ -151,7 +216,6 @@ export default function HomePage() {
     return saved && NAV_ITEMS.some((item) => item.key === saved) ? saved : "overview";
   });
   const [projects, setProjects] = useState<Project[]>(seedProjects);
-  const [applications, setApplications] = useState<Application[]>(seedApplications);
   const [tasks, setTasks] = useState<PlannerTask[]>(seedTasks);
   const [studyItems, setStudyItems] = useState<StudyItem[]>(seedStudy);
   const [questions, setQuestions] = useState<Question[]>(seedQuestions);
@@ -174,14 +238,13 @@ export default function HomePage() {
   }, [view]);
 
   useEffect(() => {
-    void fetch("/api/app-state").then((response) => response.json()).then((payload: { state?: Partial<{ projects: Project[]; applications: Application[]; tasks: PlannerTask[]; studyItems: StudyItem[]; questions: Question[]; suggestions: MemorySuggestion[]; diary: string; diaryAllowed: boolean }> | null }) => {
+    void fetch("/api/app-state").then((response) => response.json()).then((payload: { state?: Partial<{ projects: Project[]; tasks: PlannerTask[]; studyItems: StudyItem[]; questions: Question[]; suggestions: MemorySuggestion[]; diary: string; diaryAllowed: boolean }> | null }) => {
       const saved = payload.state;
       if (saved) {
         if (saved.projects) setProjects(saved.projects);
-        if (saved.applications) setApplications(saved.applications);
         if (saved.tasks) setTasks(saved.tasks);
         if (saved.studyItems) setStudyItems(saved.studyItems);
-        if (saved.questions) setQuestions(saved.questions);
+        if (saved.questions) setQuestions(saved.questions.map(normalizeQuestionRecord));
         if (saved.suggestions) setSuggestions(saved.suggestions);
         if (typeof saved.diary === "string") setDiary(saved.diary);
         if (typeof saved.diaryAllowed === "boolean") setDiaryAllowed(saved.diaryAllowed);
@@ -191,10 +254,9 @@ export default function HomePage() {
           try {
             const old = JSON.parse(legacy);
             if (old.projects) setProjects(old.projects);
-            if (old.applications) setApplications(old.applications);
             if (old.tasks) setTasks(old.tasks);
             if (old.studyItems) setStudyItems(old.studyItems);
-            if (old.questions) setQuestions(old.questions);
+            if (old.questions) setQuestions(old.questions.map(normalizeQuestionRecord));
             if (old.suggestions) setSuggestions(old.suggestions);
             window.localStorage.removeItem("life-management-demo");
           } catch { /* discard malformed legacy cache */ }
@@ -206,7 +268,9 @@ export default function HomePage() {
 
   useEffect(() => {
     const loadPlannerSnapshot = async () => {
-      const response = await fetch(`/api/today-plan?date=${new Date().toISOString().slice(0, 10)}`);
+      const timeZone = Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC";
+      const date = todayDateKey(timeZone);
+      const response = await fetch(`/api/today-plan?date=${date}`, { cache: "no-store" });
       const payload = await response.json().catch(() => null) as { plan?: { plannerSnapshot?: PlannerSnapshot | null } } | null;
       setPlannerSnapshot(payload?.plan?.plannerSnapshot ?? null);
     };
@@ -241,8 +305,8 @@ export default function HomePage() {
 
   useEffect(() => {
     if (!stateLoaded) return;
-    void fetch("/api/app-state", { method: "PUT", headers: { "content-type": "application/json" }, body: JSON.stringify({ projects, applications, tasks, studyItems, questions, suggestions, diary, diaryAllowed }) });
-  }, [stateLoaded, projects, applications, tasks, studyItems, questions, suggestions, diary, diaryAllowed]);
+    void fetch("/api/app-state", { method: "PUT", headers: { "content-type": "application/json" }, body: JSON.stringify({ projects, tasks, studyItems, questions, suggestions, diary, diaryAllowed }) });
+  }, [stateLoaded, projects, tasks, studyItems, questions, suggestions, diary, diaryAllowed]);
 
   useEffect(() => {
     if (!toast) return;
@@ -258,18 +322,6 @@ export default function HomePage() {
     setToast(message);
   }
 
-  function updateApplicationStatus(id: string, next: ApplicationStatus) {
-    setApplications((items) => items.map((application) => {
-      if (application.id !== id) return application;
-      if (!canTransitionApplication(application.status, next)) {
-        flash(`不能从「${APPLICATION_STATUS_LABELS[application.status]}」直接变为「${APPLICATION_STATUS_LABELS[next]}」`);
-        return application;
-      }
-      flash("状态已记录到事件日志");
-      return transitionApplication(application, next, new Date().toISOString());
-    }));
-  }
-
   function addProject(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     const form = new FormData(event.currentTarget);
@@ -279,17 +331,6 @@ export default function HomePage() {
     setProjects((items) => [{ id: crypto.randomUUID(), name, summary, stack: ["待补充"], facts: [] }, ...items]);
     event.currentTarget.reset();
     flash("项目已加入，接下来可以补充 README 和事实");
-  }
-
-  function addApplication(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
-    const form = new FormData(event.currentTarget);
-    const company = String(form.get("company") ?? "").trim();
-    const role = String(form.get("role") ?? "").trim();
-    if (!company || !role) return;
-    setApplications((items) => [{ id: crypto.randomUUID(), company, role, status: "applied", appliedAt: new Date().toISOString() }, ...items]);
-    event.currentTarget.reset();
-    flash("投递已保存，状态可继续推进");
   }
 
   function addTask(event: FormEvent<HTMLFormElement>) {
@@ -317,7 +358,7 @@ export default function HomePage() {
       const response = await fetch("/api/llm", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ task: "extract_questions", text: sourceText }) });
       const payload = await response.json() as { questions?: { text: string; category: string; sourceType: "real" | "web" }[]; provider?: string };
       if (payload.questions?.length) {
-        const additions = payload.questions.filter((item) => !questions.some((question) => question.text === item.text)).map((item) => ({ id: crypto.randomUUID(), text: item.text, category: item.category, source: item.sourceType, answerBasis: "答题框架" as const, confirmed: false }));
+        const additions = payload.questions.filter((item) => !questions.some((question) => question.text === item.text)).map((item) => ({ id: crypto.randomUUID(), text: item.text, answer: "", category: item.category, source: item.sourceType }));
         setQuestions((items) => [...additions, ...items]);
         formElement.reset();
         flash(additions.length ? `本地模型新增 ${additions.length} 道草稿题` : "本地模型提炼出的题目都是精确重复");
@@ -330,7 +371,7 @@ export default function HomePage() {
     const candidates = (lines.length ? lines : ["请介绍一个你做过的项目，并说明其中最重要的取舍。", "你如何验证这项设计的效果？"]).slice(0, 4);
     const additions = candidates
       .filter((text) => !questions.some((question) => question.text === text))
-      .map((text) => ({ id: crypto.randomUUID(), text, category: "待分类", source: "real" as const, answerBasis: "答题框架" as const, confirmed: false }));
+      .map((text) => ({ id: crypto.randomUUID(), text, answer: "", category: "待分类", source: "real" as const }));
     setQuestions((items) => [...additions, ...items]);
     formElement.reset();
     flash(additions.length ? `新增 ${additions.length} 道草稿题，等待你确认` : "没有新增题目，可能是精确重复");
@@ -353,9 +394,33 @@ export default function HomePage() {
     flash("事实已确认，可以被简历和答案引用");
   }
 
-  function confirmQuestion(id: string) {
-    setQuestions((items) => items.map((question) => question.id === id ? { ...question, confirmed: true } : question));
-    flash("答案入口已打开，仍需你补充自己的回答");
+  function updateQuestionAnswer(id: string, answer: string) {
+    setQuestions((items) => items.map((question) => question.id === id ? { ...question, answer } : question));
+  }
+
+  function batchAddQuestions(raw: string) {
+    const lines = raw.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+    if (!lines.length) {
+      flash("没有识别到题目，请每行填写一道题");
+      return;
+    }
+    const additions: Question[] = [];
+    let skipped = 0;
+    for (const text of lines) {
+      const duplicate = questions.some((question) => areExactDuplicateQuestions(question.text, text))
+        || additions.some((question) => areExactDuplicateQuestions(question.text, text));
+      if (duplicate) {
+        skipped += 1;
+        continue;
+      }
+      additions.push({ id: crypto.randomUUID(), text, answer: "", category: "待分类", source: "web" });
+    }
+    if (additions.length) setQuestions((items) => [...additions, ...items]);
+    if (additions.length) {
+      flash(skipped ? `已添加 ${additions.length} 道题，跳过 ${skipped} 道重复` : `已添加 ${additions.length} 道题`);
+    } else {
+      flash(skipped ? `均为重复题目，未新增（${skipped} 道）` : "没有新增题目");
+    }
   }
 
   function decideMemory(id: string, status: "已确认" | "已拒绝") {
@@ -383,8 +448,8 @@ export default function HomePage() {
           <div className="page-intro"><div><span className="eyebrow">{current.eyebrow}</span><h1>{view === "overview" ? (plannerSnapshot?.tone ?? "一张牌，一个计划，今天从这里开始...") : current.title}</h1>{view !== "overview" && <p>{current.description}</p>}</div>{view === "overview" && <div className="date-chip"><span>今日</span><strong>{todayLabel()}</strong></div>}</div>
           {view === "overview" && <OverviewView tasks={tasks} projects={projects} doneCount={doneCount} confirmedFacts={confirmedFacts} overviewStats={overviewStats} setView={setView} plannerSnapshot={plannerSnapshot} diary={diary} onPlannerDetail={() => setShowPlannerDetail(true)} onTodayPlan={() => setShowTodayPlan(true)} onTodayStatus={() => setShowTodayStatus(true)} />}
           {view === "projects" && <ProjectsView projects={projects} addProject={addProject} confirmFact={confirmFact} />}
-          {view === "applications" && <ApplicationsView applications={applications} addApplication={addApplication} updateApplicationStatus={updateApplicationStatus} />}
-          {view === "interviews" && <InterviewsView questions={questions} generateQuestions={generateQuestions} confirmQuestion={confirmQuestion} />}
+          {view === "applications" && <ApplicationsView flash={flash} />}
+          {view === "interviews" && <InterviewsView questions={questions} generateQuestions={generateQuestions} updateQuestionAnswer={updateQuestionAnswer} batchAddQuestions={batchAddQuestions} />}
           {view === "study" && <StudyView items={studyItems} reviewStudyItem={reviewStudyItem} />}
           {view === "memory" && <MemoryView suggestions={suggestions} decideMemory={decideMemory} />}
         </div>
@@ -399,7 +464,7 @@ export default function HomePage() {
 
 function TodayPlanModal({ onClose }: { onClose: () => void }) {
   const [cards, setCards] = useState(() => shuffleTarot());
-  const today = new Date().toISOString().slice(0, 10);
+  const today = todayDateKey(Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC");
   const [draw, setDraw] = useState<TarotDraw | null>(null);
   const [selectedId, setSelectedId] = useState("");
   const [selectedOrientation, setSelectedOrientation] = useState<"upright" | "reversed">("upright");
@@ -443,7 +508,7 @@ function TodayPlanModal({ onClose }: { onClose: () => void }) {
 }
 
 function PlannerDetailModal({ snapshot, onClose }: { snapshot: PlannerSnapshot; onClose: () => void }) {
-  return <div className="modal-backdrop" onClick={onClose}><section className="planner-detail-modal" onClick={(event) => event.stopPropagation()}><div className="modal-head"><div><span className="eyebrow">PLANNER AGENT</span><h2>今日建议详情</h2></div><button className="icon-button" onClick={onClose}>×</button></div><div className="planner-detail-content">{snapshot.tarot && <div className="planner-detail-card"><span className="eyebrow">牌面</span><strong>{snapshot.tarot.card} · {snapshot.tarot.orientation}</strong><small>{snapshot.tarot.keywords?.join(" · ")}</small></div>}{snapshot.tone && <div className="planner-detail-section"><span>给今天的一句话</span><p>{snapshot.tone}</p></div>}{snapshot.observations && snapshot.observations.length > 0 && <div className="planner-detail-section"><span>代码依据</span>{snapshot.observations.map((item) => <p className="planner-detail-observation" key={item}>· {item}</p>)}</div>}<div className="planner-detail-section"><span>规划 Agent 生成的全部建议</span>{snapshot.suggestions?.map((suggestion, index) => <article className="planner-detail-suggestion" key={`${suggestion.text}-${index}`}><b>{index + 1}</b><div><strong>{suggestion.text}</strong></div></article>)}</div></div><button className="primary-button full" onClick={onClose}>知道了</button></section></div>;
+  return <div className="modal-backdrop" onClick={onClose}><section className="planner-detail-modal" onClick={(event) => event.stopPropagation()}><div className="modal-head"><div><span className="eyebrow">PLANNER AGENT</span><h2>今日建议详情</h2></div><button className="icon-button" onClick={onClose}>×</button></div><div className="planner-detail-content">{snapshot.tarot && <div className="planner-detail-card"><span className="eyebrow">牌面</span><strong>{snapshot.tarot.card} · {snapshot.tarot.orientation}</strong><small>{describeTarotCard(snapshot.tarot.card ?? "", snapshot.tarot.orientation ?? "正位")}</small></div>}{snapshot.tone && <div className="planner-detail-section"><span>给今天的一句话</span><p>{snapshot.tone}</p></div>}{snapshot.observations && snapshot.observations.length > 0 && <div className="planner-detail-section"><span>代码依据</span>{snapshot.observations.map((item) => <p className="planner-detail-observation" key={item}>· {item}</p>)}</div>}<div className="planner-detail-section"><span>规划 Agent 生成的全部建议</span>{snapshot.suggestions?.map((suggestion, index) => <article className="planner-detail-suggestion" key={`${suggestion.text}-${index}`}><b>{index + 1}</b><div><strong>{suggestion.text}</strong></div></article>)}</div></div><button className="primary-button full" onClick={onClose}>知道了</button></section></div>;
 }
 
 function TodayStatusModal({ diary, setDiary, diaryAllowed, setDiaryAllowed, onClose }: { diary: string; setDiary: (value: string) => void; diaryAllowed: boolean; setDiaryAllowed: (value: boolean) => void; onClose: () => void }) {
@@ -487,26 +552,274 @@ function ContentResumePanel() {
 }
 
 
-function ApplicationsView({ applications, addApplication, updateApplicationStatus }: { applications: Application[]; addApplication: (event: FormEvent<HTMLFormElement>) => void; updateApplicationStatus: (id: string, next: ApplicationStatus) => void }) {
+const MATCH_SCORE_LABELS: Record<keyof ResumeMatchScores, string> = { skillCoverage: "技能覆盖", evidence: "经历证据", keywordMatch: "关键词", relevance: "岗位相关", clarity: "表达清楚" };
+
+function MatchScore({ scores }: { scores: ResumeMatchScores }) {
+  const total = calculateResumeMatchScore(scores);
+  const percent = Math.round((total / 5) * 100);
+  return <div className="match-score"><div className="match-score-total"><b>{percent}</b><span>匹配度</span></div><p>{total.toFixed(1)} / 5 · 五项由模型打分，总分由代码按权重计算</p><div className="match-score-dims">{(Object.keys(MATCH_SCORE_LABELS) as (keyof ResumeMatchScores)[]).map((key) => <i key={key}>{MATCH_SCORE_LABELS[key]} {scores[key]}</i>)}</div></div>;
+}
+
+function ApplicationsView({ flash }: { flash: (message: string) => void }) {
+  const [applications, setApplications] = useState<Application[]>([]);
+  const [listNotice, setListNotice] = useState("");
+  const [saving, setSaving] = useState(false);
+  const [analyzing, setAnalyzing] = useState(false);
   const [openId, setOpenId] = useState<string | null>(null);
   const [resumeName, setResumeName] = useState("尚未上传原始简历");
   const [resumeHtml, setResumeHtml] = useState("");
-  useEffect(() => { void fetch("/api/resume").then((response) => response.json()).then(async (payload: { resume?: { fileName?: string; htmlContent?: string } | null }) => { if (payload.resume) { setResumeName(payload.resume.fileName ?? "已上传简历"); setResumeHtml(payload.resume.htmlContent ?? ""); return; } const legacy = window.localStorage.getItem("source-resume"); if (!legacy) return; try { const old = JSON.parse(legacy) as { fileName?: string; htmlContent?: string }; if (old.fileName && old.htmlContent) { setResumeName(old.fileName); setResumeHtml(old.htmlContent); await fetch("/api/resume", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(old) }); window.localStorage.removeItem("source-resume"); } } catch { /* discard malformed legacy cache */ } }).catch(() => undefined); }, []);
-  const [draft, setDraft] = useState({ company: "", role: "", base: "", salary: "", jd: "" });
+  const [resumeNotice, setResumeNotice] = useState("");
+  async function loadApplications() {
+    try {
+      const response = await fetch("/api/applications", { cache: "no-store" });
+      const payload = await response.json() as { ok?: boolean; applications?: Application[] };
+      if (!response.ok || !payload.ok) {
+        setApplications([]);
+        setListNotice("投递列表读取失败，请确认数据库可用");
+        return;
+      }
+      setApplications(payload.applications ?? []);
+      setListNotice("");
+    } catch {
+      setApplications([]);
+      setListNotice("投递列表读取失败，请确认数据库可用");
+    }
+  }
+  useEffect(() => { void loadApplications(); }, []);
+  useEffect(() => {
+    void fetch("/api/resume").then(async (response) => {
+      const payload = await response.json() as { ok?: boolean; resume?: { fileName?: string; htmlContent?: string } | null };
+      if (!response.ok || !payload.ok) {
+        setResumeNotice("简历读取失败，请确认数据库可用");
+        return;
+      }
+      if (payload.resume?.htmlContent) {
+        setResumeName(payload.resume.fileName || "已上传简历");
+        setResumeHtml(payload.resume.htmlContent);
+      }
+    }).catch(() => setResumeNotice("简历读取失败，请确认数据库可用"));
+  }, []);
+  async function uploadResume(event: ChangeEvent<HTMLInputElement>) {
+    const file = event.target.files?.[0];
+    event.target.value = "";
+    if (!file) return;
+    setResumeNotice("正在写入数据库…");
+    try {
+      const response = await fetch("/api/resume", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ fileName: file.name, htmlContent: await file.text() }) });
+      const payload = await response.json() as { ok?: boolean; resume?: { fileName?: string; htmlContent?: string } };
+      if (!response.ok || !payload.ok || !payload.resume?.htmlContent) {
+        setResumeNotice("保存失败，简历没有写入数据库");
+        return;
+      }
+      setResumeName(payload.resume.fileName || "已上传简历");
+      setResumeHtml(payload.resume.htmlContent);
+      setResumeNotice("");
+    } catch {
+      setResumeNotice("保存失败，简历没有写入数据库");
+    }
+  }
+  const [draft, setDraft] = useState({ company: "", role: "", base: "", salary: "", jd: "", appliedDate: "", appliedTime: "" });
   const [match, setMatch] = useState<any>(null);
+  const [jdImagePreview, setJdImagePreview] = useState<string | null>(null);
+  const [jdImageStatus, setJdImageStatus] = useState("");
   const withSilent = markSilentApplications(applications, new Date("2026-11-11T12:00:00.000Z"), 7);
-  function openApplication(application?: Application) { setOpenId(application?.id ?? "new"); setMatch(null); setDraft(application ? { company: application.company, role: application.role, base: "", salary: "", jd: "" } : { company: "", role: "", base: "", salary: "", jd: "" }); }
-  async function analyze() { const response = await fetch("/api/llm", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ task: "resume_match", jd: draft.jd, resume: resumeName, projectContext: "已确认项目事实库" }) }); const payload = await response.json(); setMatch(payload.data ?? null); }
-  async function pasteJdImage(event: React.ClipboardEvent<HTMLTextAreaElement>) { const clipboardFile = Array.from(event.clipboardData.files).find((file) => file.type.startsWith("image/")); const clipboardItem = Array.from(event.clipboardData.items).find((item) => item.type.startsWith("image/")); const file = clipboardFile ?? clipboardItem?.getAsFile(); if (!file) return; event.preventDefault(); const form = new FormData(); form.append("images", file, file.name || "pasted-jd.png"); const response = await fetch("/api/ocr", { method: "POST", body: form }); const payload = await response.json(); setDraft((current) => ({ ...current, company: payload.fields?.company || current.company, base: payload.fields?.base || current.base, salary: payload.fields?.salary || current.salary, jd: payload.fields?.jd || payload.text || current.jd })); }
-  return <div className="view-stack"><section className="panel original-resume-panel"><div><span className="eyebrow">SOURCE RESUME</span><h2>原始简历</h2><p>所有公司匹配度分析都以这一份简历为基础。</p></div><label className="resume-upload">↑ 上传或替换简历<input type="file" accept=".html,.txt" onChange={async (e) => { const file = e.target.files?.[0]; if (!file) return; const html = await file.text(); setResumeName(file.name); setResumeHtml(html); await fetch("/api/resume", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ fileName: file.name, htmlContent: html }) }); }} /></label><span className="resume-name">{resumeName}</span>{resumeHtml && <details className="resume-preview"><summary>预览 HTML 简历</summary><iframe title="原始简历预览" sandbox="allow-same-origin" srcDoc={resumeHtml} /></details>}</section><div className="toolbar-row"><div><strong>{applications.length} 个已投递机会</strong><span className="muted"> · 点击公司行查看详情</span></div><button className="primary-button" onClick={() => openApplication()}>＋ 添加投递</button></div><div className="panel table-panel"><div className="table-head"><span>公司 / 职位</span><span>状态</span><span>投递日期</span><span>简历版本</span><span /></div>{withSilent.map((application) => <button className="application-row clickable-row" key={application.id} onClick={() => openApplication(application)}><div className="company-cell"><div className="company-logo">{application.company.slice(0, 1)}</div><div><strong>{application.company}</strong><small>{application.role}</small></div></div><div onClick={(e) => e.stopPropagation()}><select value={application.status} onChange={(event) => updateApplicationStatus(application.id, event.target.value as ApplicationStatus)}>{(Object.keys(APPLICATION_STATUS_LABELS) as ApplicationStatus[]).map((status) => <option key={status} value={status}>{APPLICATION_STATUS_LABELS[status]}</option>)}</select>{application.silent && <span className="silent-chip">沉默 12d</span>}</div><span className="date-text">{application.appliedAt.slice(5, 10).replace("-", "/")}</span><span className="version-chip">v{application.status === "interviewing" ? "03" : "01"}</span><span className="icon-button">•••</span></button>)}</div>{openId && <div className="modal-backdrop" onClick={() => setOpenId(null)}><section className="application-modal" onClick={(e) => e.stopPropagation()}><div className="modal-head"><div><span className="eyebrow">APPLICATION DETAIL</span><h2>{openId === "new" ? "添加投递" : draft.company}</h2></div><button className="icon-button" onClick={() => setOpenId(null)}>×</button></div><div className="modal-grid"><label>公司名称<input value={draft.company} onChange={(e) => setDraft({ ...draft, company: e.target.value })} /></label><label>职位名称<input value={draft.role} onChange={(e) => setDraft({ ...draft, role: e.target.value })} /></label><label>公司 base 地<input value={draft.base} onChange={(e) => setDraft({ ...draft, base: e.target.value })} /></label><label>薪资范围<input value={draft.salary} onChange={(e) => setDraft({ ...draft, salary: e.target.value })} /></label></div><label className="modal-field">JD 内容<textarea value={draft.jd} onPaste={pasteJdImage} onChange={(e) => setDraft({ ...draft, jd: e.target.value })} placeholder="粘贴 JD 文字，或直接粘贴截图（⌘V / Ctrl+V）…" /></label><label className="multi-upload">↑ 上传 JD 截图（可多张）<input type="file" accept="image/*" multiple /></label><div className="modal-actions"><button className="secondary-button" onClick={() => setOpenId(null)}>保存信息</button><button className="primary-button" onClick={analyze}>生成匹配度和修改建议</button></div>{match && <div className="modal-match"><strong>匹配分析</strong>{match.gaps.map((gap: any) => <p key={gap.skill}><b>{gap.skill}</b> · {gap.reason} · 建议：{gap.suggestion}</p>)}</div>}</section></div>}</div>;
+  useEffect(() => () => { if (jdImagePreview) URL.revokeObjectURL(jdImagePreview); }, [jdImagePreview]);
+  function openApplication(application?: Application) {
+    const parts = localDateTimeParts(application?.appliedAt);
+    setOpenId(application?.id ?? "new");
+    setMatch(application?.matchAnalysis ?? null);
+    setAnalyzing(false);
+    setJdImagePreview(null);
+    setJdImageStatus("");
+    setDraft(application
+      ? { company: application.company, role: application.role, base: application.base ?? "", salary: application.salary ?? "", jd: application.jobDescription ?? "", appliedDate: parts.date, appliedTime: parts.time }
+      : { company: "", role: "", base: "", salary: "", jd: "", appliedDate: parts.date, appliedTime: parts.time });
+  }
+  async function saveApplication() {
+    const company = draft.company.trim();
+    const role = draft.role.trim();
+    const appliedAt = appliedAtIso(draft.appliedDate, draft.appliedTime);
+    if (!company || !role) {
+      setJdImageStatus("请填写公司名称和职位名称后再保存。");
+      return;
+    }
+    if (!appliedAt) {
+      setJdImageStatus("请填写有效的投递日期和时间后再保存。");
+      return;
+    }
+    setSaving(true);
+    try {
+      const isNew = openId === "new";
+      const response = await fetch("/api/applications", {
+        method: isNew ? "POST" : "PATCH",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ id: isNew ? undefined : openId, company, role, base: draft.base.trim(), salary: draft.salary.trim(), jobDescription: draft.jd.trim(), appliedAt, ...(match ? { matchAnalysis: match } : {}) })
+      });
+      const payload = await response.json() as { ok?: boolean; error?: string };
+      if (!response.ok || !payload.ok) {
+        setJdImageStatus(payload.error || "保存失败，投递没有写入数据库");
+        return;
+      }
+      await loadApplications();
+      setOpenId(null);
+      flash("投递已保存");
+    } catch {
+      setJdImageStatus("保存失败，投递没有写入数据库");
+    } finally {
+      setSaving(false);
+    }
+  }
+  async function changeStatus(id: string, next: ApplicationStatus) {
+    const current = applications.find((item) => item.id === id);
+    if (!current) return;
+    if (!canTransitionApplication(current.status, next)) {
+      flash(`不能从「${APPLICATION_STATUS_LABELS[current.status]}」直接变为「${APPLICATION_STATUS_LABELS[next]}」`);
+      return;
+    }
+    const response = await fetch("/api/applications", { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify({ id, status: next }) });
+    const payload = await response.json() as { ok?: boolean };
+    if (!response.ok || !payload.ok) {
+      flash("状态未能写入数据库");
+      return;
+    }
+    await loadApplications();
+    flash("状态已保存");
+  }
+  async function analyze() {
+    if (analyzing) return;
+    const jd = draft.jd.trim();
+    const resume = htmlToPlainText(resumeHtml);
+    if (!jd || !resume) {
+      setMatch({
+        gaps: [{ skill: "待分析", evidence: "缺少原文", reason: "需要读取 JD 和简历原文", suggestion: !resume ? "先上传原始简历后再分析" : "先粘贴或识别 JD 后再分析" }],
+        highlights: [],
+        safetyChecked: true
+      });
+      return;
+    }
+    setAnalyzing(true);
+    try {
+      const response = await fetch("/api/llm", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ task: "resume_match", jd, resume, projectContext: "已确认项目事实库" }) });
+      const payload = await response.json() as { data?: Application["matchAnalysis"] };
+      const analysis = payload.data ?? null;
+      setMatch(analysis);
+      if (analysis && openId && openId !== "new") {
+        const saveResponse = await fetch("/api/applications", { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify({ id: openId, matchAnalysis: analysis }) });
+        const saved = await saveResponse.json() as { ok?: boolean };
+        if (!saveResponse.ok || !saved.ok) {
+          flash("匹配结果已生成，但没有写入数据库");
+        } else {
+          setApplications((items) => items.map((item) => item.id === openId ? { ...item, matchAnalysis: analysis } : item));
+        }
+      }
+    } catch {
+      setMatch({
+        gaps: [{ skill: "待分析", evidence: "匹配请求失败", reason: "分析请求没有完成", suggestion: "确认本地模型可用后重试" }],
+        highlights: [],
+        safetyChecked: true
+      });
+    } finally {
+      setAnalyzing(false);
+    }
+  }
+  async function processJdImages(files: File[]) {
+    if (!files.length) return;
+    setJdImagePreview(URL.createObjectURL(files[0]));
+    setJdImageStatus(files.length > 1 ? `已接收 ${files.length} 张截图，正在识别…` : "已接收截图，正在识别…");
+    const form = new FormData();
+    files.forEach((file, index) => form.append("images", file, file.name || `pasted-jd-${index + 1}.png`));
+    try {
+      const response = await fetch("/api/ocr", { method: "POST", body: form });
+      const payload = await response.json() as OcrPayload;
+      if (!response.ok) throw new Error(`OCR HTTP ${response.status}`);
+      const fields = payload.fields ?? {};
+      const company = typeof fields.company === "string" ? fields.company.trim() : "";
+      const role = typeof fields.role === "string" ? fields.role.trim() : "";
+      const base = typeof fields.base === "string" ? fields.base.trim() : "";
+      const salary = typeof fields.salary === "string" ? fields.salary.trim() : "";
+      const structuredJd = typeof fields.jd === "string" ? fields.jd.trim() : "";
+      const rawText = payload.text?.trim() ?? "";
+      const jd = rawText && (!structuredJd || structuredJd.length < Math.max(80, rawText.length * 0.6)) ? rawText : (structuredJd || rawText);
+      setDraft((current) => ({ ...current, company: company || current.company, role: role || current.role, base: base || current.base, salary: salary || current.salary, jd: jd || current.jd }));
+      if (company || role || base || salary || jd) {
+        setJdImageStatus("截图已识别，内容已回填到表单。");
+      } else if (payload.fallback) {
+        setJdImageStatus("截图已接收，但本地 OCR 服务未启动；请先启动 OCR，或直接粘贴文字。");
+      } else {
+        setJdImageStatus(payload.message || "截图已接收，但没有识别到文字；请确认图片清晰，或直接粘贴文字。");
+      }
+    } catch {
+      setJdImageStatus("截图已接收，但识别请求失败；请稍后重试，或直接粘贴文字。");
+    }
+  }
+  async function pasteJdImage(event: React.ClipboardEvent<HTMLTextAreaElement>) {
+    const files = clipboardImageFiles(event);
+    if (!files.length) return;
+    event.preventDefault();
+    await processJdImages(files);
+  }
+  async function uploadJdImages(event: React.ChangeEvent<HTMLInputElement>) {
+    const files = Array.from(event.target.files ?? []).filter(isImageFile);
+    event.target.value = "";
+    await processJdImages(files);
+  }
+  return <div className="view-stack"><section className="panel original-resume-panel"><div><span className="eyebrow">SOURCE RESUME</span><h2>原始简历</h2><p>所有公司匹配度分析都以这一份简历为基础。</p></div><label className="resume-upload">↑ 上传或替换简历<input type="file" accept=".html,.txt" onChange={uploadResume} /></label><span className="resume-name">{resumeName}</span>{resumeNotice && <span className="resume-name">{resumeNotice}</span>}{resumeHtml && <details className="resume-preview"><summary>预览 HTML 简历</summary><iframe title="原始简历预览" sandbox="allow-same-origin" srcDoc={resumeHtml} /></details>}</section><div className="toolbar-row"><div><strong>{applications.length} 个已投递机会</strong><span className="muted"> · 点击公司行查看详情</span>{listNotice && <span className="muted"> · {listNotice}</span>}</div><button className="primary-button" onClick={() => openApplication()}>＋ 添加投递</button></div><div className="panel table-panel"><div className="table-head"><span>公司 / 职位</span><span>状态</span><span>投递日期</span><span>简历版本</span><span /></div>{withSilent.map((application) => <button className="application-row clickable-row" key={application.id} onClick={() => openApplication(application)}><div className="company-cell"><div className="company-logo">{application.company.slice(0, 1)}</div><div><strong>{application.company}</strong><small>{application.role}</small></div></div><div onClick={(e) => e.stopPropagation()}><select value={application.status} onChange={(event) => void changeStatus(application.id, event.target.value as ApplicationStatus)}>{(Object.keys(APPLICATION_STATUS_LABELS) as ApplicationStatus[]).map((status) => <option key={status} value={status}>{APPLICATION_STATUS_LABELS[status]}</option>)}</select>{application.silent && <span className="silent-chip">沉默 12d</span>}</div><span className="date-text">{formatAppliedList(application.appliedAt)}</span><span className="version-chip">{application.resumeVersion || application.company}</span><span className="icon-button">•••</span></button>)}</div>{openId && <div className="modal-backdrop" onClick={() => setOpenId(null)}><section className="application-modal" onClick={(e) => e.stopPropagation()}><div className="modal-head"><div><span className="eyebrow">APPLICATION DETAIL</span><h2>{openId === "new" ? "添加投递" : draft.company}</h2></div><button className="icon-button" onClick={() => setOpenId(null)}>×</button></div><div className="modal-grid"><label>公司名称<input value={draft.company} onChange={(e) => setDraft({ ...draft, company: e.target.value })} /></label><label>职位名称<input value={draft.role} onChange={(e) => setDraft({ ...draft, role: e.target.value })} /></label><label>公司 base 地<input value={draft.base} onChange={(e) => setDraft({ ...draft, base: e.target.value })} /></label><label>薪资范围<input value={draft.salary} onChange={(e) => setDraft({ ...draft, salary: e.target.value })} /></label><label>投递日期<input type="date" value={draft.appliedDate} onChange={(e) => setDraft({ ...draft, appliedDate: e.target.value })} /></label><label>投递时间<input type="time" value={draft.appliedTime} onChange={(e) => setDraft({ ...draft, appliedTime: e.target.value })} /></label></div><label className="modal-field">JD 内容<textarea value={draft.jd} onPaste={pasteJdImage} onChange={(e) => setDraft({ ...draft, jd: e.target.value })} placeholder="粘贴 JD 文字，或直接粘贴截图（⌘V / Ctrl+V）…" /></label><label className="multi-upload">↑ 上传 JD 截图（可多张）<input type="file" accept="image/*" multiple onChange={uploadJdImages} /></label>{(jdImagePreview || jdImageStatus) && <div className="jd-image-status" role="status">{jdImagePreview && <img src={jdImagePreview} alt="已粘贴的 JD 截图" />}<div><strong>{jdImageStatus.startsWith("已接收") ? "正在处理截图" : "截图处理结果"}</strong><span>{jdImageStatus}</span></div></div>}<div className="modal-actions"><button className="secondary-button" disabled={saving} onClick={() => void saveApplication()}>{saving ? "保存中…" : "保存信息"}</button><button className="primary-button" disabled={analyzing} aria-busy={analyzing} onClick={() => void analyze()}>{analyzing && <span className="loading-spinner" aria-hidden="true" />}{analyzing ? "正在分析…" : "生成匹配度和修改建议"}</button></div>{analyzing && <p className="muted">本地模型正在读取 JD 和简历原文，通常需要几十秒。</p>}{match && <div className="modal-match"><strong>匹配分析</strong>{match.scores && <MatchScore scores={match.scores} />}{match.highlights?.map((item: string) => <p key={item}>匹配点 · {item}</p>)}{match.gaps.map((gap: any) => <p key={gap.skill}><b>{gap.skill}</b> · {gap.reason} · 建议：{gap.suggestion}</p>)}</div>}</section></div>}</div>;
 }
 
-function InterviewsView({ questions, generateQuestions, confirmQuestion }: { questions: Question[]; generateQuestions: (event: FormEvent<HTMLFormElement>) => void; confirmQuestion: (id: string) => void }) {
+function QuestionBankList({ questions, updateQuestionAnswer }: { questions: Question[]; updateQuestionAnswer: (id: string, answer: string) => void }) {
+  const [openAnswerId, setOpenAnswerId] = useState<string | null>(null);
+  return (
+    <div className="question-list">
+      {questions.map((question, index) => {
+        const answerOpen = openAnswerId === question.id;
+        return (
+          <article className={`panel question-card ${answerOpen ? "answer-open" : ""}`} key={question.id}>
+            <div className="question-top">
+              <span className="question-number">Q{String(index + 1).padStart(2, "0")}</span>
+              <h3>{question.text}</h3>
+              <button
+                type="button"
+                className="text-button question-answer-toggle"
+                aria-expanded={answerOpen}
+                onClick={() => setOpenAnswerId((current) => current === question.id ? null : question.id)}
+              >
+                {answerOpen ? "收起答案" : "查看答案"} <span>{answerOpen ? "↑" : "→"}</span>
+              </button>
+            </div>
+            {answerOpen && (
+              <div className="question-answer-panel">
+                <label className="question-answer-label">
+                  <span>我的回答</span>
+                  <textarea
+                    value={question.answer}
+                    onChange={(event) => updateQuestionAnswer(question.id, event.target.value)}
+                    placeholder="在这里写下你的回答，内容会自动保存…"
+                    rows={8}
+                  />
+                </label>
+              </div>
+            )}
+          </article>
+        );
+      })}
+    </div>
+  );
+}
+
+function InterviewsView({ questions, generateQuestions, updateQuestionAnswer, batchAddQuestions }: { questions: Question[]; generateQuestions: (event: FormEvent<HTMLFormElement>) => void; updateQuestionAnswer: (id: string, answer: string) => void; batchAddQuestions: (raw: string) => void }) {
   const [sourceText, setSourceText] = useState("");
+  const [showBatchModal, setShowBatchModal] = useState(false);
+  const [batchText, setBatchText] = useState("");
+  const batchPreviewCount = batchText.split(/\r?\n/).map((line) => line.trim()).filter(Boolean).length;
   async function uploadQuestionImages(files: FileList | null) { if (!files?.length) return; const form = new FormData(); Array.from(files).forEach((file) => form.append("images", file)); const response = await fetch("/api/ocr", { method: "POST", body: form }); const payload = await response.json(); if (payload.text) setSourceText((current) => current ? `${current}\n${payload.text}` : payload.text); }
   const [rubric, setRubric] = useState<RubricScores>({ accuracy: 4, completeness: 3, structure: 4, example: 3, concision: 4 });
   const total = calculateWeightedScore(rubric);
-  return <div className="view-stack"><div className="split-layout"><section className="panel extraction-panel"><PanelHeader title="录入面经" action="支持截图" onAction={() => undefined} /><form onSubmit={generateQuestions}><textarea name="sourceText" value={sourceText} onChange={(event) => setSourceText(event.target.value)} placeholder="粘贴面试记录，或上传截图后核对转写…\n\n识别结果会回填到这里，你可以先修改。" /><div className="form-row"><label className="upload-control"><span>↑</span> 上传截图<input type="file" accept="image/*" multiple onChange={(event) => uploadQuestionImages(event.target.files)} /></label><button className="primary-button">提炼题目</button></div></form><div className="safety-callout"><span>◌</span><div><strong>外部文本只当数据</strong><p>截图或面经中的指令不会被执行，提炼结果需要你确认。</p></div></div></section><section className="panel rubric-panel"><PanelHeader title="回答评分预览" action="固定 rubric" onAction={() => undefined} /><p className="muted">总分由代码按权重计算，模型只引用回答原话。</p><div className="rubric-list">{(Object.keys(rubric) as (keyof RubricScores)[]).map((key) => <label key={key}><span>{rubricLabel(key)}</span><input type="range" min="1" max="5" value={rubric[key]} onChange={(event) => setRubric({ ...rubric, [key]: Number(event.target.value) })} /><b>{rubric[key]}</b></label>)}</div><div className="score-total"><span>当前练习分数</span><strong>{total.toFixed(1)}</strong><small>/ 5.0</small></div><button className="outline-button full">粘贴我的回答开始评分 <span>→</span></button></section></div><div className="section-heading"><div><span className="eyebrow">QUESTION BANK</span><h2>题库 · {questions.length}</h2></div><div className="legend"><span>精确重复自动合并</span><span>相似题先人工确认</span></div></div><div className="question-list">{questions.map((question) => <article className="panel question-card" key={question.id}><div className="question-top"><span className="question-number">Q{String(questions.indexOf(question) + 1).padStart(2, "0")}</span><div><div className="question-tags"><span className="tag neutral">{question.category}</span><span className={`tag ${question.source === "real" ? "coral" : "violet"}`}>{question.source === "real" ? "真实面试" : "网上面经"}</span></div><h3>{question.text}</h3></div><span className={`question-status ${question.confirmed ? "confirmed" : "draft"}`}>{question.confirmed ? "已确认" : "草稿"}</span></div><div className="question-bottom"><span>答案依据 · {question.answerBasis}</span>{question.confirmed ? <button className="text-button">查看答案草稿 →</button> : <button className="confirm-link" onClick={() => confirmQuestion(question.id)}>确认进入练习</button>}</div></article>)}</div></div>;
+  function submitBatch() {
+    batchAddQuestions(batchText);
+    setBatchText("");
+    setShowBatchModal(false);
+  }
+  return <div className="view-stack"><div className="split-layout"><section className="panel extraction-panel"><PanelHeader title="录入面经" action="支持截图" onAction={() => undefined} /><form onSubmit={generateQuestions}><textarea name="sourceText" value={sourceText} onChange={(event) => setSourceText(event.target.value)} placeholder="粘贴面试记录，或上传截图后核对转写…\n\n识别结果会回填到这里，你可以先修改。" /><div className="form-row"><label className="upload-control"><span>↑</span> 上传截图<input type="file" accept="image/*" multiple onChange={(event) => uploadQuestionImages(event.target.files)} /></label><button className="primary-button">提炼题目</button></div></form><div className="safety-callout"><span>◌</span><div><strong>外部文本只当数据</strong><p>截图或面经中的指令不会被执行，提炼结果需要你确认。</p></div></div></section><section className="panel rubric-panel"><PanelHeader title="回答评分预览" action="固定 rubric" onAction={() => undefined} /><p className="muted">总分由代码按权重计算，模型只引用回答原话。</p><div className="rubric-list">{(Object.keys(rubric) as (keyof RubricScores)[]).map((key) => <label key={key}><span>{rubricLabel(key)}</span><input type="range" min="1" max="5" value={rubric[key]} onChange={(event) => setRubric({ ...rubric, [key]: Number(event.target.value) })} /><b>{rubric[key]}</b></label>)}</div><div className="score-total"><span>当前练习分数</span><strong>{total.toFixed(1)}</strong><small>/ 5.0</small></div><button className="outline-button full">粘贴我的回答开始评分 <span>→</span></button></section></div><div className="section-heading"><div><span className="eyebrow">QUESTION BANK</span><h2>题库 · {questions.length}</h2></div><div className="question-bank-actions"><div className="legend"><span>精确重复自动合并</span></div><button type="button" className="primary-button" onClick={() => setShowBatchModal(true)}>＋ 批量添加</button></div></div><QuestionBankList questions={questions} updateQuestionAnswer={updateQuestionAnswer} />{showBatchModal && <div className="modal-backdrop" onClick={() => setShowBatchModal(false)}><section className="application-modal question-batch-modal" onClick={(e) => e.stopPropagation()}><div className="modal-head"><div><span className="eyebrow">BATCH IMPORT</span><h2>批量添加面试题</h2><p className="muted">每行一道题，空行会自动忽略。</p></div><button type="button" className="icon-button" onClick={() => setShowBatchModal(false)}>×</button></div><label className="modal-field">题目列表<textarea value={batchText} onChange={(event) => setBatchText(event.target.value)} placeholder={"RAG 怎么评估？\n如何保证模型生成的简历没有编造？\n你的多 Agent 项目里，为什么报表不用 ReAct？"} rows={12} /></label><div className="batch-import-meta"><span className="muted">已识别 {batchPreviewCount} 道题</span></div><div className="modal-actions"><button type="button" className="secondary-button" onClick={() => setShowBatchModal(false)}>取消</button><button type="button" className="primary-button" disabled={!batchPreviewCount} onClick={submitBatch}>导入到题库</button></div></section></div>}</div>;
 }
 
 function StudyView({ items, reviewStudyItem }: { items: StudyItem[]; reviewStudyItem: (id: string, score: number) => void }) { return <div className="view-stack"><div className="study-summary"><div><span className="eyebrow">TODAY'S REVIEW</span><h2>今天有 {items.length} 个学习条目</h2><p>每次评分都会计算下一次复习日期，低于 3 分会回到第一档。</p></div><div className="streak-card"><strong>06</strong><span>day streak</span></div></div><div className="study-list">{items.map((item) => <article className="panel study-card" key={item.id}><div className={`study-type ${item.type}`}>{item.type === "algo" ? "ALGO" : item.type === "project" ? "PROJECT" : "Q"}</div><div className="study-main"><div className="study-title-row"><h3>{item.title}</h3><span className="next-review">到期 {item.nextReviewAt}</span></div><div className="stage-track">{[0, 1, 2, 3, 4].map((stage) => <i className={stage <= item.stage ? "on" : ""} key={stage} />)}<span>阶段 {item.stage + 1} / 5</span></div></div><div className="review-actions"><span>本次掌握度</span><div>{[1, 2, 3, 4, 5].map((score) => <button key={score} onClick={() => reviewStudyItem(item.id, score)}>{score}</button>)}</div></div></article>)}</div></div>; }

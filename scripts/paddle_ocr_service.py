@@ -31,13 +31,37 @@ def extract_text(path: str) -> str:
     return "\n".join(pieces)
 
 
+FIELD_KEYS = ("company", "role", "base", "salary", "jd")
+
+STRUCTURE_SYSTEM_PROMPT = """你只处理 OCR 后的招聘信息文本。输出 JSON，字段只能是 company、role、base、salary、jd。
+规则：
+- company：公司名称
+- role：职位名称，不要把职位名写进 jd
+- base：工作城市或 base 地
+- salary：薪资范围
+- jd：岗位描述全文。必须原样保留 OCR 文本中的职位职责、任职要求、加分项、福利等全部内容，禁止总结、缩写、改写，也禁止只填职位标题。
+不要提取面试问题和回答，不要编造原文没有的内容。某个字段在原文中不存在就留空字符串。"""
+
+
+def keep_full_jd(fields: dict[str, str], text: str) -> dict[str, str]:
+    jd = fields.get("jd", "").strip()
+    raw = text.strip()
+    if not fields.get("role") and jd and len(jd) <= 40 and "\n" not in jd:
+        fields["role"] = jd
+    if raw and (not jd or len(jd) < max(80, int(len(raw) * 0.6))):
+        fields["jd"] = raw
+    elif jd:
+        fields["jd"] = jd
+    return fields
+
+
 async def structure_fields(text: str) -> dict[str, str]:
     prompt = {
         "model": ollama_model,
         "stream": False,
         "format": "json",
         "messages": [
-            {"role": "system", "content": "你只处理 OCR 后的招聘信息文本。只提取 company、base、jd、salary 四个字段。不要提取面试问题和回答，不要编造内容。字段没有就留空。"},
+            {"role": "system", "content": STRUCTURE_SYSTEM_PROMPT},
             {"role": "user", "content": text},
         ],
     }
@@ -46,7 +70,8 @@ async def structure_fields(text: str) -> dict[str, str]:
         response.raise_for_status()
         content = response.json().get("message", {}).get("content", "{}")
     parsed = json.loads(content)
-    return {key: str(parsed.get(key, "")) for key in ("company", "base", "jd", "salary")}
+    fields = {key: str(parsed.get(key, "")).strip() for key in FIELD_KEYS}
+    return keep_full_jd(fields, text)
 
 
 @app.post("/ocr")
@@ -62,5 +87,5 @@ async def ocr_images(images: list[UploadFile] = File(...)):
     try:
         fields = await structure_fields(text)
     except Exception:
-        fields = {"company": "", "base": "", "jd": text, "salary": ""}
+        fields = {**{key: "" for key in FIELD_KEYS}, "jd": text}
     return {"text": text, "fields": fields, "provider": "paddleocr+qwen2.5:3b"}

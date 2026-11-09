@@ -1,6 +1,8 @@
 import { NextResponse } from "next/server";
 import { analyzeMemoryTrend, analyzeResumeMatch, extractInterviewQuestions, generatePlannerSuggestion, generateReflection, llmConfig } from "@/lib/llm-gateway";
 
+export const maxDuration = 120;
+
 export async function GET() {
   return NextResponse.json({ ok: true, config: llmConfig() });
 }
@@ -19,7 +21,13 @@ export async function POST(request: Request) {
     const result = await generatePlannerSuggestion({ card: body.card ?? "节制", orientation: body.orientation === "逆位" ? "逆位" : "正位", keywords: body.keywords ?? ["平衡", "节奏"], userPlan: body.userPlan ?? "", mood: body.mood ?? "", observations: body.observations ?? [] });
     return NextResponse.json({ ok: true, ...result });
   }
-  if (body?.task === "resume_match") return NextResponse.json({ ok: true, data: await analyzeResumeMatch({ jd: body.jd ?? "", resume: body.resume ?? "", projectContext: body.projectContext ?? "" }) });
-  if (body?.task === "memory_trend") return NextResponse.json({ ok: true, data: await analyzeMemoryTrend({ history: body.history ?? "", confirmedProfile: body.confirmedProfile ?? "" }) });
+  if (body?.task === "resume_match") {
+    const result = await analyzeResumeMatch({ jd: body.jd ?? "", resume: body.resume ?? "", projectContext: body.projectContext ?? "" });
+    return NextResponse.json({ ok: true, ...result });
+  }
+  if (body?.task === "memory_trend") {
+    const result = await analyzeMemoryTrend({ history: body.history ?? "", confirmedProfile: body.confirmedProfile ?? "" });
+    return NextResponse.json({ ok: true, ...result });
+  }
   return NextResponse.json({ ok: false, error: "未知的 LLM 任务" }, { status: 400 });
 }

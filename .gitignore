@@ -3,8 +3,16 @@ node_modules
 out
 .env
 .env.local
+.env.*.local
 uploads
 *.log
 drizzle/meta
 .pnpm-store
 *.tsbuildinfo
+.DS_Store
+.venv
+.venv-ocr
+venv
+__pycache__/
+*.py[cod]
+.Python

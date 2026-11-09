@@ -4,28 +4,63 @@ type ChatMessage = { role: "system" | "user"; content: string };
 
 const OLLAMA_URL = process.env.OLLAMA_BASE_URL ?? "http://127.0.0.1:11434";
 const OLLAMA_MODEL = process.env.OLLAMA_MODEL ?? "qwen2.5:3b";
+const OLLAMA_TIMEOUT_MS = Number(process.env.OLLAMA_TIMEOUT_MS ?? 90_000);
 
 export type LlmResult<T> = { data: T; provider: "ollama" | "fallback"; model: string; error?: string };
 
-async function chatJson<T>(messages: ChatMessage[], parse: (value: unknown) => T): Promise<LlmResult<T>> {
+function parseModelJson(content: string): unknown {
+  const trimmed = content.trim();
+  const candidates = [trimmed];
+  const fenced = trimmed.match(/```(?:json)?\s*([\s\S]*?)```/i);
+  if (fenced?.[1]) candidates.push(fenced[1].trim());
+  const objectMatch = trimmed.match(/\{[\s\S]*\}/);
+  if (objectMatch) candidates.push(objectMatch[0]);
+  for (const candidate of candidates) {
+    try {
+      return JSON.parse(candidate);
+    } catch {
+      // Try the next candidate extracted from the model output.
+    }
+  }
+  throw new Error("模型没有返回可解析的 JSON");
+}
+
+function describeLlmError(error: unknown) {
+  const message = error instanceof Error ? error.message : "本地模型调用失败";
+  if (error instanceof Error && (error.name === "AbortError" || /abort|timeout/i.test(message))) {
+    return { reason: "本地模型响应超时", suggestion: "请稍后重新分析" };
+  }
+  if (/HTTP 404/i.test(message)) {
+    return { reason: "本地还没有安装指定模型", suggestion: `执行 ollama pull ${OLLAMA_MODEL} 后重试` };
+  }
+  if (/fetch failed|ECONNREFUSED|Failed to fetch|未连接/i.test(message)) {
+    return { reason: "尚未连接到本地模型", suggestion: "确认 Ollama 服务已启动后重新分析" };
+  }
+  return { reason: "本地模型输出无法用于匹配分析", suggestion: "请稍后重新分析" };
+}
+
+async function chatJson<T>(messages: ChatMessage[], parse: (value: unknown) => T, timeoutMs = OLLAMA_TIMEOUT_MS): Promise<LlmResult<T>> {
   let lastError = "本地模型未连接";
   for (let attempt = 0; attempt < 2; attempt += 1) {
     try {
       const controller = new AbortController();
-      const timeout = setTimeout(() => controller.abort(), Number(process.env.OLLAMA_TIMEOUT_MS ?? 8_000));
-      const response = await fetch(`${OLLAMA_URL}/api/chat`, {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ model: OLLAMA_MODEL, messages, stream: false, format: "json", options: { temperature: 0.2 } }),
-        signal: controller.signal
-      });
-      clearTimeout(timeout);
-      if (!response.ok) throw new Error(`Ollama HTTP ${response.status}`);
-      const payload = await response.json() as { message?: { content?: string } };
-      const content = payload.message?.content ?? "";
-      return { data: parse(JSON.parse(content)), provider: "ollama", model: OLLAMA_MODEL };
+      const timeout = setTimeout(() => controller.abort(), timeoutMs);
+      try {
+        const response = await fetch(`${OLLAMA_URL}/api/chat`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ model: OLLAMA_MODEL, messages, stream: false, format: "json", options: { temperature: 0.2 } }),
+          signal: controller.signal
+        });
+        if (!response.ok) throw new Error(`Ollama HTTP ${response.status}`);
+        const payload = await response.json() as { message?: { content?: string } };
+        return { data: parse(parseModelJson(payload.message?.content ?? "")), provider: "ollama", model: OLLAMA_MODEL };
+      } finally {
+        clearTimeout(timeout);
+      }
     } catch (error) {
       lastError = error instanceof Error ? error.message : "本地模型调用失败";
+      if (error instanceof Error && (error.name === "AbortError" || /abort|timeout/i.test(error.message))) break;
     }
   }
   throw new Error(lastError);
@@ -73,14 +108,108 @@ export function llmConfig() {
   return { baseUrl: OLLAMA_URL, model: OLLAMA_MODEL, provider: "ollama" as const };
 }
 
-export async function analyzeResumeMatch(input: { jd: string; resume: string; projectContext: string }) {
-  const fallback = resumeMatchSchema.parse({ gaps: [{ skill: "待分析", evidence: "尚未连接本地模型", reason: "需要读取 JD 和简历原文", suggestion: "启动 Ollama 后重新分析" }], highlights: [], safetyChecked: true });
-  try { return await chatJson([{ role: "system", content: "你是简历匹配分析器。只能引用 JD、简历和项目资料中的内容，不能编造技能、公司、数字或经历。只输出 JSON，字段为 gaps、highlights、safetyChecked。" }, { role: "user", content: JSON.stringify(input) }], (value) => resumeMatchSchema.parse(value)); } catch { return fallback; }
+function dimensionScore(value: unknown) {
+  const number = typeof value === "number" ? value : typeof value === "string" ? Number(value) : Number.NaN;
+  if (!Number.isFinite(number)) return null;
+  const scaled = number > 5 ? number / 20 : number;
+  return Math.max(1, Math.min(5, Math.round(scaled)));
 }
 
-export async function analyzeMemoryTrend(input: { history: string; confirmedProfile: string }) {
+function readResumeScores(value: unknown) {
+  if (!value || typeof value !== "object") return undefined;
+  const record = value as Record<string, unknown>;
+  const scores = {
+    skillCoverage: dimensionScore(record.skillCoverage ?? record.skill_coverage),
+    evidence: dimensionScore(record.evidence),
+    keywordMatch: dimensionScore(record.keywordMatch ?? record.keyword_match),
+    relevance: dimensionScore(record.relevance),
+    clarity: dimensionScore(record.clarity)
+  };
+  if (Object.values(scores).some((item) => item == null)) return undefined;
+  return scores as { skillCoverage: number; evidence: number; keywordMatch: number; relevance: number; clarity: number };
+}
+
+function asResumeMatch(value: unknown) {
+  const record = value && typeof value === "object" ? value as Record<string, unknown> : {};
+  const gaps = Array.isArray(record.gaps) ? record.gaps : [];
+  const highlights = Array.isArray(record.highlights) ? record.highlights : [];
+  return resumeMatchSchema.parse({
+    scores: readResumeScores(record.scores),
+    gaps: gaps.map((item) => {
+      const gap = item && typeof item === "object" ? item as Record<string, unknown> : {};
+      return {
+        skill: String(gap.skill ?? gap.name ?? "未命名缺口").trim() || "未命名缺口",
+        evidence: String(gap.evidence ?? "").trim() || "模型未给出原文依据",
+        reason: String(gap.reason ?? "").trim() || "模型未说明原因",
+        suggestion: String(gap.suggestion ?? "").trim() || "补充对应经历或技能证据"
+      };
+    }),
+    highlights: highlights.map((item) => String(item).trim()).filter(Boolean),
+    safetyChecked: true
+  });
+}
+
+function clipPrompt(text: string, max = 12_000) {
+  const trimmed = text.trim();
+  return trimmed.length <= max ? trimmed : `${trimmed.slice(0, max)}\n…`;
+}
+
+export async function analyzeResumeMatch(input: { jd: string; resume: string; projectContext: string }): Promise<LlmResult<ReturnType<typeof resumeMatchSchema.parse>>> {
+  const jd = clipPrompt(input.jd);
+  const resume = clipPrompt(input.resume);
+  if (!jd || !resume) {
+    return {
+      data: resumeMatchSchema.parse({
+        gaps: [{ skill: "待分析", evidence: "缺少原文", reason: "需要读取 JD 和简历原文", suggestion: "先补全 JD 和原始简历后再分析" }],
+        highlights: [],
+        safetyChecked: true
+      }),
+      provider: "fallback",
+      model: OLLAMA_MODEL,
+      error: "missing_source"
+    };
+  }
+  try {
+    const result = await chatJson([
+      { role: "system", content: "你是简历匹配分析器。只能引用 JD、简历和项目资料中的内容，不能编造技能、公司、数字或经历。只输出 JSON，字段为 scores、gaps、highlights、safetyChecked。scores 必须放在最前面，并给出五个 1 到 5 的整数：skillCoverage 技能覆盖、evidence 经历证据、keywordMatch 关键词对应、relevance 岗位相关、clarity 表达是否清楚。不要输出总分。gaps 每项包含 skill、evidence、reason、suggestion。highlights 是字符串数组。safetyChecked 必须为 true。" },
+      { role: "user", content: JSON.stringify({ jd, resume, projectContext: clipPrompt(input.projectContext, 4_000) }) }
+    ], asResumeMatch);
+    if (result.data.scores) return result;
+    const scoreResult = await chatJson([
+      { role: "system", content: "根据 JD 和简历给五个维度打 1 到 5 的整数。只输出 JSON，且只有 scores：skillCoverage、evidence、keywordMatch、relevance、clarity。不要解释，不要输出总分。" },
+      { role: "user", content: JSON.stringify({ jd: jd.slice(0, 2500), resume: resume.slice(0, 2500) }) }
+    ], (value) => {
+      const record = value && typeof value === "object" ? value as Record<string, unknown> : {};
+      const scores = readResumeScores(record.scores ?? record);
+      if (!scores) throw new Error("missing scores");
+      return scores;
+    });
+    return { ...result, data: { ...result.data, scores: scoreResult.data } };
+  } catch (error) {
+    const { reason, suggestion } = describeLlmError(error);
+    return {
+      data: resumeMatchSchema.parse({
+        gaps: [{ skill: "待分析", evidence: "本地模型本次没有完成分析", reason, suggestion }],
+        highlights: [],
+        safetyChecked: true
+      }),
+      provider: "fallback",
+      model: OLLAMA_MODEL,
+      error: error instanceof Error ? error.message : "本地模型调用失败"
+    };
+  }
+}
+
+export async function analyzeMemoryTrend(input: { history: string; confirmedProfile: string }): Promise<LlmResult<ReturnType<typeof memoryTrendSchema.parse>>> {
   const fallback = memoryTrendSchema.parse({ observations: ["历史数据不足，暂不形成长期结论。"], suggestions: [], safetyChecked: true });
-  try { return await chatJson([{ role: "system", content: "你是记忆分析器。只根据原始历史记录提出规律候选，不直接写入画像。每条建议必须 requiresConfirmation=true。只输出 JSON。" }, { role: "user", content: JSON.stringify(input) }], (value) => memoryTrendSchema.parse(value)); } catch { return fallback; }
+  try {
+    return await chatJson([
+      { role: "system", content: "你是记忆分析器。只根据原始历史记录提出规律候选，不直接写入画像。每条建议必须 requiresConfirmation=true。只输出 JSON。" },
+      { role: "user", content: JSON.stringify(input) }
+    ], (value) => memoryTrendSchema.parse(value));
+  } catch (error) {
+    return { data: fallback, provider: "fallback", model: OLLAMA_MODEL, error: error instanceof Error ? error.message : "本地模型调用失败" };
+  }
 }
 
 export async function generatePlannerSuggestion(input: { card: string; orientation: "正位" | "逆位"; keywords: string[]; userPlan: string; mood: string; observations: string[] }): Promise<LlmResult<ReturnType<typeof plannerSuggestionSchema.parse>>> {
