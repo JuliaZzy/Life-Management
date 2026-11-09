@@ -14,24 +14,9 @@
 
 ## 二、整体工作流
 
-```mermaid
-flowchart LR
-    A[输入材料<br/>项目 README / 简历 / JD / 面经 / 日记] --> B[总控 Agent<br/>识别任务并分发]
-    B --> C[事实库 Agent<br/>提炼项目事实并等待确认]
-    B --> D[求职 Agent<br/>岗位分析与简历匹配]
-    B --> E[面试 Agent<br/>整理题目与回答反馈]
-    B --> F[学习 Agent<br/>安排复习与巩固]
-    B --> G[规划 Agent<br/>生成今日行动顺序]
-    B --> H[反思与记忆 Agent<br/>总结趋势并提出建议]
-    C --> I[共享工作台<br/>事实 / 任务 / 记录 / 日志]
-    D --> I
-    E --> I
-    F --> I
-    G --> I
-    H --> I
-    I --> J[用户确认与调整]
-    J --> I
-```
+![整体工作流示意](docs/diagrams/workflow.svg)
+
+图源为 Mermaid，可编辑 `docs/diagrams/workflow.mmd` 后执行 `node scripts/render-workflow.mjs` 重新生成。
 
 这不是“一个模型包办所有事情”，而是**多个有明确边界的 Agent 协作**：模型负责理解、提炼、生成和解释；日期、状态、排序、去重、评分和复习间隔由系统规则完成。这样既能提高效率，也能让每一步都能追溯和修改。
 
@@ -47,7 +32,7 @@ flowchart LR
 
 **页面：项目与事实**
 
-![项目与事实页面](docs/screenshots/02-projects.svg)
+![项目与事实页面](docs/screenshots/02-projects.png)
 
 - 从项目 README、图片或文字中提炼架构、难点、取舍和结果。
 - 把内容标成“候选事实”和“已确认事实”。
@@ -59,7 +44,7 @@ flowchart LR
 
 **页面：求职投递**
 
-![求职投递页面](docs/screenshots/03-applications.svg)
+![求职投递页面](docs/screenshots/03-applications.png)
 
 - 支持录入 JD，也支持直接粘贴或上传 JD 截图。
 - 提取公司、岗位、地点、薪资和岗位要求。
@@ -70,7 +55,7 @@ flowchart LR
 
 **页面：面试题库**
 
-![面试题库页面](docs/screenshots/04-interviews.svg)
+![面试题库页面](docs/screenshots/04-interviews.png)
 
 - 支持粘贴面经或上传面试截图。
 - 将原始内容整理成可练习的问题，识别并提示重复题目。
@@ -81,7 +66,7 @@ flowchart LR
 
 **页面：学习复习**
 
-![学习复习页面](docs/screenshots/05-study.svg)
+![学习复习页面](docs/screenshots/05-study.png)
 
 - 把算法题、项目题和面试题放入统一的学习列表。
 - 根据本次掌握程度安排下一次复习时间。
@@ -93,7 +78,7 @@ flowchart LR
 
 **页面：今日总览**
 
-![今日总览页面](docs/screenshots/01-overview.svg)
+![今日总览页面](docs/screenshots/01-overview.png)
 
 规划 Agent 综合面试、截止日期、投递跟进、固定学习和到期复习，生成当天的行动顺序，并展示每项任务的原因和时长。
 
@@ -103,7 +88,7 @@ flowchart LR
 
 **页面：记忆与日志**
 
-![记忆与日志页面](docs/screenshots/06-memory.svg)
+![记忆与日志页面](docs/screenshots/06-memory.png)
 
 - 根据任务完成情况、投递变化、复习记录和用户日记生成每日反思。
 - 可以结合塔罗牌做轻量的自我观察，但只用于反思，不参与求职决策和任务排序。
